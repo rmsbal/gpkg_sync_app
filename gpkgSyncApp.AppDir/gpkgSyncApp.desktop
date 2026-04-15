@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=gpkgSyncApp-1.0
+Exec=gpkgSyncApp
+Icon=gpkgSyncApp
+Categories=Utility;
+Comment=Auto sync gpkg for qgis
+Terminal=false
