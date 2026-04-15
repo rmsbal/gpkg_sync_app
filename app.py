@@ -32,6 +32,7 @@ Notes:
 from __future__ import annotations
 
 import contextlib
+import ftplib
 import hashlib
 import json
 import os
@@ -46,6 +47,7 @@ import traceback
 from dataclasses import dataclass, asdict
 from datetime import datetime
 from pathlib import Path, PurePosixPath
+from types import SimpleNamespace
 from typing import Callable, Dict, List, Optional, Tuple
 
 import paramiko
@@ -196,6 +198,7 @@ class SyncProfile:
     username: str
     password: str = ""
     key_path: str = ""
+    protocol: str = "sftp"
     local_dir: str = ""
     remote_dir: str = ""
     direction: str = "two-way"  # upload-only, download-only, two-way
@@ -218,10 +221,17 @@ class SyncProfile:
             return False, "Remote directory is required."
         if not Path(self.local_dir).exists():
             return False, "Local directory does not exist."
+        protocol = self.protocol.lower()
+        if protocol not in {"sftp", "ftp", "ftps"}:
+            return False, "Invalid protocol."
         if self.direction not in {"upload-only", "download-only", "two-way"}:
             return False, "Invalid sync direction."
-        if not self.password and not self.key_path:
-            return False, "Provide either password or SSH key path."
+        if protocol == "sftp":
+            if not self.password and not self.key_path:
+                return False, "Provide either password or SSH key path."
+        else:
+            if not self.password and self.username.lower() != "anonymous":
+                return False, "Password is required for FTP/FTPS."
         return True, ""
 
 
@@ -476,6 +486,188 @@ class SFTPManager:
         return found
 
 
+class FTPManager:
+    def __init__(self, profile: SyncProfile):
+        self.profile = profile
+        self.ftp: Optional[ftplib.FTP] = None
+        self._lock = threading.Lock()
+
+    def connect(self) -> None:
+        with self._lock:
+            if self.ftp is not None:
+                return
+            if self.profile.protocol.lower() == "ftps":
+                ftp = ftplib.FTP_TLS()
+            else:
+                ftp = ftplib.FTP()
+            ftp.connect(self.profile.host, self.profile.port, timeout=30)
+            ftp.login(self.profile.username, self.profile.password or "")
+            if self.profile.protocol.lower() == "ftps":
+                ftp.prot_p()
+            self.ftp = ftp
+
+    def close(self) -> None:
+        with self._lock:
+            with contextlib.suppress(Exception):
+                if self.ftp:
+                    self.ftp.quit()
+            with contextlib.suppress(Exception):
+                if self.ftp:
+                    self.ftp.close()
+            self.ftp = None
+
+    def ensure_connected(self) -> None:
+        if self.ftp is None:
+            self.connect()
+
+    def stat(self, remote_path: str):
+        self.ensure_connected()
+        assert self.ftp is not None
+        try:
+            size = self.ftp.size(remote_path)
+        except Exception as exc:
+            raise FileNotFoundError from exc
+        mtime = 0.0
+        try:
+            response = self.ftp.sendcmd(f"MDTM {remote_path}")
+            if response.startswith("213 "):
+                stamp = response[4:].strip()
+                mtime = time.mktime(time.strptime(stamp, "%Y%m%d%H%M%S"))
+        except Exception:
+            pass
+        return SimpleNamespace(st_size=size, st_mtime=mtime)
+
+    def exists(self, remote_path: str) -> bool:
+        try:
+            self.stat(remote_path)
+            return True
+        except FileNotFoundError:
+            return False
+
+    def mkdirs(self, remote_dir: str) -> None:
+        self.ensure_connected()
+        assert self.ftp is not None
+        path = str(PurePosixPath(remote_dir))
+        if not path or path == ".":
+            return
+        parts = [p for p in PurePosixPath(path).parts if p not in ("/", "")]
+        current = "" if not path.startswith("/") else "/"
+        for part in parts:
+            current = posixpath.join(current, part) if current else part
+            try:
+                self.ftp.cwd(current)
+            except Exception:
+                with contextlib.suppress(Exception):
+                    self.ftp.mkd(current)
+                self.ftp.cwd(current)
+
+    def upload(
+        self,
+        local_path: Path,
+        remote_path: str,
+        callback: Optional[Callable[[int, int], None]] = None,
+    ) -> None:
+        self.ensure_connected()
+        assert self.ftp is not None
+        self.mkdirs(str(PurePosixPath(remote_path).parent))
+        total = max(1, local_path.stat().st_size)
+        sent = 0
+        with local_path.open("rb") as f:
+            def store_cb(data: bytes) -> None:
+                nonlocal sent
+                sent += len(data)
+                if callback:
+                    callback(sent, total)
+            self.ftp.storbinary(f"STOR {remote_path}", f, 8192, callback=store_cb)
+
+    def download(
+        self,
+        remote_path: str,
+        local_path: Path,
+        callback: Optional[Callable[[int, int], None]] = None,
+    ) -> None:
+        self.ensure_connected()
+        assert self.ftp is not None
+        local_path.parent.mkdir(parents=True, exist_ok=True)
+        total = max(1, self.ftp.size(remote_path) or 1)
+        received = 0
+        with local_path.open("wb") as f:
+            def retr_cb(data: bytes) -> None:
+                nonlocal received
+                f.write(data)
+                received += len(data)
+                if callback:
+                    callback(received, total)
+            self.ftp.retrbinary(f"RETR {remote_path}", retr_cb, 8192)
+
+    def remove(self, remote_path: str) -> None:
+        self.ensure_connected()
+        assert self.ftp is not None
+        self.ftp.delete(remote_path)
+
+    def walk_remote_files(self, remote_root: str) -> List[Dict[str, object]]:
+        self.ensure_connected()
+        assert self.ftp is not None
+        found: List[Dict[str, object]] = []
+        try:
+            entries = list(self.ftp.mlsd(remote_root))
+        except Exception:
+            entries = None
+
+        if entries is not None:
+            for name, facts in entries:
+                if name in (".", ".."):
+                    continue
+                path = posixpath.join(remote_root, name)
+                if facts.get("type") == "dir":
+                    found.extend(self.walk_remote_files(path))
+                elif facts.get("type") == "file" and Path(name).suffix.lower() in SYNC_EXTENSIONS:
+                    size = int(facts.get("size", 0))
+                    mtime = 0.0
+                    modify = facts.get("modify")
+                    if modify:
+                        try:
+                            mtime = time.mktime(time.strptime(modify, "%Y%m%d%H%M%S"))
+                        except Exception:
+                            pass
+                    found.append({"path": path, "size": size, "mtime": mtime})
+            return found
+
+        def _walk(path: str) -> None:
+            try:
+                entries = self.ftp.nlst(path)
+            except Exception:
+                return
+            for name in entries:
+                if name in (".", ".."):
+                    continue
+                candidate = name if name.startswith("/") else posixpath.join(path, name)
+                try:
+                    self.ftp.cwd(candidate)
+                    _walk(candidate)
+                    self.ftp.cwd(path)
+                except Exception:
+                    if Path(name).suffix.lower() in SYNC_EXTENSIONS:
+                        try:
+                            size = self.ftp.size(candidate)
+                        except Exception:
+                            size = 0
+                        mtime = 0.0
+                        try:
+                            response = self.ftp.sendcmd(f"MDTM {candidate}")
+                            if response.startswith("213 "):
+                                stamp = response[4:].strip()
+                                mtime = time.mktime(time.strptime(stamp, "%Y%m%d%H%M%S"))
+                        except Exception:
+                            pass
+                        found.append({"path": candidate, "size": size, "mtime": mtime})
+
+        try:
+            _walk(remote_root)
+        except Exception:
+            self.mkdirs(remote_root)
+        return found
+
 # ----------------------------- Watcher ------------------------------------ #
 
 
@@ -543,7 +735,10 @@ class SyncEngine(QObject):
         super().__init__()
         self.profile = profile
         self.db = db
-        self.sftp = SFTPManager(profile)
+        if profile.protocol.lower() in {"ftp", "ftps"}:
+            self.sftp = FTPManager(profile)
+        else:
+            self.sftp = SFTPManager(profile)
         self.watcher: Optional[FolderWatcher] = None
         self.running = False
         self.scan_timer: Optional[QTimer] = None
@@ -565,7 +760,7 @@ class SyncEngine(QObject):
         try:
             self.sftp.connect()
             self.status_changed.emit("Watching")
-            self.emit_log("INFO", "Connected to SFTP server.")
+            self.emit_log("INFO", "Connected to remote server.")
         except Exception as e:
             self.status_changed.emit("Connection failed")
             self.emit_log("ERROR", f"Failed to connect: {e}")
@@ -901,6 +1096,8 @@ class ProfileDialog(QDialog):
         self.name_edit = QLineEdit()
         self.host_edit = QLineEdit()
         self.port_spin = QSpinBox()
+        self.protocol_combo = QComboBox()
+        self.protocol_combo.addItems(["sftp", "ftp", "ftps"])
         self.port_spin.setRange(1, 65535)
         self.port_spin.setValue(22)
         self.username_edit = QLineEdit()
@@ -935,6 +1132,7 @@ class ProfileDialog(QDialog):
 
         form.addRow("Profile name", self.name_edit)
         form.addRow("Host", self.host_edit)
+        form.addRow("Protocol", self.protocol_combo)
         form.addRow("Port", self.port_spin)
         form.addRow("Username", self.username_edit)
         form.addRow("Password", self.password_edit)
@@ -983,6 +1181,7 @@ class ProfileDialog(QDialog):
     def _load(self, p: SyncProfile) -> None:
         self.name_edit.setText(p.name)
         self.host_edit.setText(p.host)
+        self.protocol_combo.setCurrentText(p.protocol)
         self.port_spin.setValue(p.port)
         self.username_edit.setText(p.username)
         self.password_edit.setText(p.password)
@@ -1000,6 +1199,7 @@ class ProfileDialog(QDialog):
         return SyncProfile(
             name=self.name_edit.text().strip(),
             host=self.host_edit.text().strip(),
+            protocol=self.protocol_combo.currentText(),
             port=int(self.port_spin.value()),
             username=self.username_edit.text().strip(),
             password=self.password_edit.text(),
