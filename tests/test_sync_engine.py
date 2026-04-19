@@ -1,0 +1,150 @@
+from __future__ import annotations
+
+import tempfile
+import unittest
+from pathlib import Path
+
+from PySide6.QtCore import QCoreApplication
+
+from gpkg_sync.logging_utils import AppLogger
+from gpkg_sync.models import SyncProfile
+from gpkg_sync.storage import StateDB
+from gpkg_sync.sync_engine import SyncEngine, normalize_remote_path, safe_relpath
+
+
+class FakeTransport:
+    def __init__(self):
+        self.connected = False
+        self.files = {}
+        self.download_fail = False
+        self.removed = []
+
+    def connect(self):
+        self.connected = True
+
+    def close(self):
+        self.connected = False
+
+    def stat(self, remote_path: str):
+        if remote_path not in self.files:
+            raise FileNotFoundError(remote_path)
+        size, mtime = self.files[remote_path]
+        return type("Stat", (), {"st_size": size, "st_mtime": mtime})()
+
+    def exists(self, remote_path: str):
+        return remote_path in self.files
+
+    def mkdirs(self, remote_dir: str):
+        return None
+
+    def upload(self, local_path: Path, remote_path: str, callback=None):
+        data = local_path.read_bytes()
+        self.files[remote_path] = (len(data), 100.0)
+        if callback:
+            callback(len(data), len(data))
+
+    def download(self, remote_path: str, local_path: Path, callback=None):
+        local_path.parent.mkdir(parents=True, exist_ok=True)
+        local_path.write_bytes(b"remote-bytes")
+        if callback:
+            callback(len(b"remote-bytes"), len(b"remote-bytes"))
+        if self.download_fail:
+            raise RuntimeError("download failed")
+
+    def remove(self, remote_path: str):
+        self.removed.append(remote_path)
+        self.files.pop(remote_path, None)
+
+    def walk_remote_files(self, remote_root: str):
+        found = []
+        for path, (size, mtime) in self.files.items():
+            found.append({"path": path, "size": size, "mtime": mtime})
+        return found
+
+
+class FakeWatcher:
+    def __init__(self, root: Path):
+        self.root = root
+        self.started = False
+        self.stopped = False
+        self.file_changed = type("SignalStub", (), {"connect": lambda self, func: None})()
+
+    def start(self):
+        self.started = True
+
+    def stop(self):
+        self.stopped = True
+
+    def deleteLater(self):
+        return None
+
+
+class SyncEngineTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.qt_app = QCoreApplication.instance() or QCoreApplication([])
+
+    def setUp(self):
+        self.tempdir = tempfile.TemporaryDirectory()
+        base = Path(self.tempdir.name)
+        self.local_dir = base / "local"
+        self.local_dir.mkdir()
+        self.db = StateDB(base / "state.db")
+        self.logger = AppLogger(self.db)
+        self.profile = SyncProfile(
+            name="prod",
+            host="example.com",
+            port=22,
+            username="alice",
+            password="secret",
+            protocol="sftp",
+            local_dir=str(self.local_dir),
+            remote_dir="/remote",
+            device_label="device",
+        )
+        self.transport = FakeTransport()
+        self.engine = SyncEngine(self.profile, self.db, self.logger, transport=self.transport, watcher_factory=FakeWatcher)
+
+    def tearDown(self):
+        self.tempdir.cleanup()
+
+    def test_path_helpers(self):
+        nested = self.local_dir / "a" / "b.gpkg"
+        nested.parent.mkdir(parents=True)
+        nested.write_text("x", encoding="utf-8")
+        self.assertEqual(safe_relpath(nested, self.local_dir), "a/b.gpkg")
+        self.assertEqual(normalize_remote_path("/remote", "a/b.gpkg"), "/remote/a/b.gpkg")
+
+    def test_download_is_atomic(self):
+        target = self.local_dir / "remote.gpkg"
+        self.transport.files["/remote/remote.gpkg"] = (12, 10.0)
+        self.engine.download_remote_file("/remote/remote.gpkg", target, 10.0, 12, "remote newer")
+        self.assertTrue(target.exists())
+        self.assertEqual(target.read_bytes(), b"remote-bytes")
+        self.assertFalse((self.local_dir / ".remote.gpkg.part").exists())
+
+    def test_download_failure_does_not_leave_partial_file(self):
+        target = self.local_dir / "remote.gpkg"
+        self.transport.files["/remote/remote.gpkg"] = (12, 10.0)
+        self.transport.download_fail = True
+        with self.assertRaises(RuntimeError):
+            self.engine.download_remote_file("/remote/remote.gpkg", target, 10.0, 12, "remote newer")
+        self.assertFalse((self.local_dir / ".remote.gpkg.part").exists())
+
+    def test_delete_propagation(self):
+        target = self.local_dir / "gone.gpkg"
+        target.write_text("old", encoding="utf-8")
+        remote = "/remote/gone.gpkg"
+        self.transport.files[remote] = (3, 10.0)
+        self.profile.delete_missing = True
+        target.unlink()
+        self.engine.sync_local_change(target)
+        self.assertIn(remote, self.transport.removed)
+
+    def test_start_stop_are_idempotent(self):
+        self.engine.start()
+        self.engine.start()
+        self.assertTrue(self.engine.running)
+        self.engine.request_stop()
+        self.engine.request_stop()
+        self.assertFalse(self.engine.running)

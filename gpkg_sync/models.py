@@ -1,0 +1,87 @@
+from __future__ import annotations
+
+import os
+from dataclasses import asdict, dataclass
+from pathlib import Path
+from typing import Any, Dict, Optional, Tuple
+
+
+APP_NAME = "gpkg sync"
+APP_VERSION = "0.1.0"
+SYNC_EXTENSIONS = {".gpkg"}
+DEFAULT_PORTS = {
+    "sftp": 22,
+    "ftp": 21,
+    "ftps": 21,
+}
+
+
+def default_device_label() -> str:
+    return os.environ.get("COMPUTERNAME") or os.environ.get("HOSTNAME") or "device"
+
+
+@dataclass
+class SyncProfile:
+    name: str
+    host: str
+    port: int
+    username: str
+    password: str = ""
+    key_path: str = ""
+    protocol: str = "sftp"
+    local_dir: str = ""
+    remote_dir: str = ""
+    direction: str = "two-way"
+    auto_start: bool = False
+    backup_before_overwrite: bool = True
+    delete_missing: bool = False
+    device_label: str = "device"
+    stability_wait_seconds: int = 5
+    has_saved_password: bool = False
+
+    def validate(self) -> Tuple[bool, str]:
+        if not self.name.strip():
+            return False, "Profile name is required."
+        if not self.host.strip():
+            return False, "Host is required."
+        if not self.username.strip():
+            return False, "Username is required."
+        if not self.local_dir.strip():
+            return False, "Local directory is required."
+        if not self.remote_dir.strip():
+            return False, "Remote directory is required."
+        if not Path(self.local_dir).exists():
+            return False, "Local directory does not exist."
+        protocol = self.protocol.lower()
+        if protocol not in {"sftp", "ftp", "ftps"}:
+            return False, "Invalid protocol."
+        if self.direction not in {"upload-only", "download-only", "two-way"}:
+            return False, "Invalid sync direction."
+        if self.stability_wait_seconds < 2:
+            return False, "Stability wait must be at least 2 seconds."
+        if protocol == "sftp":
+            if not self.password and not self.key_path:
+                return False, "Provide either password or SSH key path."
+            if self.key_path and not Path(self.key_path).exists():
+                return False, "SSH key path does not exist."
+        elif not self.password and self.username.lower() != "anonymous":
+            return False, "Password is required for FTP/FTPS."
+        return True, ""
+
+    @classmethod
+    def from_metadata(cls, raw: Dict[str, Any], password: str = "") -> "SyncProfile":
+        data = dict(raw)
+        data["password"] = password
+        data.setdefault("device_label", default_device_label())
+        data.setdefault("stability_wait_seconds", 5)
+        data.setdefault("protocol", "sftp")
+        if not data.get("port"):
+            data["port"] = DEFAULT_PORTS.get(data["protocol"], 22)
+        data.setdefault("has_saved_password", bool(raw.get("has_saved_password")))
+        return cls(**data)
+
+    def to_metadata(self) -> Dict[str, Any]:
+        data = asdict(self)
+        data.pop("password", None)
+        data["has_saved_password"] = bool(self.password)
+        return data

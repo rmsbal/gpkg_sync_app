@@ -3,3 +3,8 @@ build/
 files/
 dist/
 .vscode/
+__pycache__/
+*.pyc
+*.AppImage
+*.AppDir/
+.codex
