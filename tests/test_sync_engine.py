@@ -9,7 +9,7 @@ from PySide6.QtCore import QCoreApplication
 from gpkg_sync.logging_utils import AppLogger
 from gpkg_sync.models import SyncProfile
 from gpkg_sync.storage import StateDB
-from gpkg_sync.sync_engine import SyncEngine, normalize_remote_path, remote_relpath, safe_relpath
+from gpkg_sync.sync_engine import SyncEngine, normalize_remote_path, remote_relpath, safe_relpath, sha1_file
 
 
 class FakeTransport:
@@ -87,6 +87,7 @@ class SyncEngineTests(unittest.TestCase):
     def setUp(self):
         self.tempdir = tempfile.TemporaryDirectory()
         base = Path(self.tempdir.name)
+        self.base = base
         self.local_dir = base / "local"
         self.local_dir.mkdir()
         self.db = StateDB(base / "state.db")
@@ -185,3 +186,92 @@ class SyncEngineTests(unittest.TestCase):
         target = self.local_dir / "config" / "README"
         self.assertTrue(target.exists())
         self.assertEqual(target.read_bytes(), b"remote-bytes")
+
+    def test_full_sync_with_multiple_watch_folders_namespaces_remote_paths(self):
+        photos_dir = self.base / "photos"
+        docs_dir = self.base / "docs"
+        photos_dir.mkdir()
+        docs_dir.mkdir()
+        profile = SyncProfile(
+            name="multi",
+            host="example.com",
+            port=22,
+            username="alice",
+            password="secret",
+            protocol="sftp",
+            local_dir=str(photos_dir),
+            watch_dirs=[str(photos_dir), str(docs_dir)],
+            remote_dir="/remote",
+            device_label="device",
+        )
+        engine = SyncEngine(profile, self.db, self.logger, transport=self.transport, watcher_factory=FakeWatcher)
+        (photos_dir / "img.jpg").write_text("a", encoding="utf-8")
+        (docs_dir / "notes.txt").write_text("b", encoding="utf-8")
+
+        engine.full_sync()
+
+        self.assertIn("/remote/photos/img.jpg", self.transport.files)
+        self.assertIn("/remote/docs/notes.txt", self.transport.files)
+
+    def test_full_sync_downloads_into_matching_watch_folder_namespace(self):
+        photos_dir = self.base / "photos"
+        docs_dir = self.base / "docs"
+        photos_dir.mkdir()
+        docs_dir.mkdir()
+        profile = SyncProfile(
+            name="multi",
+            host="example.com",
+            port=22,
+            username="alice",
+            password="secret",
+            protocol="sftp",
+            local_dir=str(photos_dir),
+            watch_dirs=[str(photos_dir), str(docs_dir)],
+            remote_dir="/remote",
+            device_label="device",
+        )
+        engine = SyncEngine(profile, self.db, self.logger, transport=self.transport, watcher_factory=FakeWatcher)
+        self.transport.files["/remote/docs/notes.txt"] = (12, 10.0)
+
+        engine.full_sync()
+
+        self.assertTrue((docs_dir / "notes.txt").exists())
+        self.assertFalse((photos_dir / "notes.txt").exists())
+
+    def test_full_sync_skips_managed_artifact_files(self):
+        artifact = self.local_dir / ".notes.txt.part"
+        artifact.write_text("temp", encoding="utf-8")
+
+        self.engine.full_sync()
+
+        self.assertNotIn("/remote/.notes.txt.part", self.transport.files)
+
+    def test_conflict_is_not_created_when_local_content_matches_last_sync(self):
+        target = self.local_dir / "report.txt"
+        target.write_text("same", encoding="utf-8")
+        local_stat = target.stat()
+
+        self.db.upsert_file_state(
+            self.profile.name,
+            str(target),
+            "/remote/report.txt",
+            float(local_stat.st_mtime),
+            5.0,
+            int(local_stat.st_size),
+            int(local_stat.st_size),
+            sha1_file(target),
+            "synced",
+            "",
+        )
+        self.transport.files["/remote/report.txt"] = (len(b"remote-bytes"), 20.0)
+        target.touch()
+
+        self.engine.reconcile_single(
+            target,
+            "/remote/report.txt",
+            {"path": "/remote/report.txt", "mtime": 20.0, "size": len(b"remote-bytes")},
+        )
+
+        self.assertEqual(target.read_bytes(), b"remote-bytes")
+        conflict_files = list(self.local_dir.glob("report.conflict-*"))
+        self.assertEqual(conflict_files, [])

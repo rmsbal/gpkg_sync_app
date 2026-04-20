@@ -1,6 +1,6 @@
 # gpkg sync
 
-Desktop app for syncing files between a local folder and a remote SFTP, FTP, or FTPS location.
+Desktop app for syncing files between one or more local watch folders and a remote SFTP, FTP, or FTPS location.
 
 ## Install on Linux
 
@@ -48,6 +48,13 @@ That folder contains:
 - `gpkg_sync.db` for sync state and logs
 
 Passwords are stored in the OS keychain, not in `profiles.json`.
+
+### Sync behavior
+
+- A profile can watch multiple local folders.
+- When a profile has one watch folder, files sync directly into the configured remote folder.
+- When a profile has multiple watch folders, each local folder is namespaced on the remote side by its folder name to avoid collisions.
+- App-managed temporary and conflict artifacts such as `.part`, `.backup-*`, and `.conflict-*` files are excluded from sync to prevent feedback loops.
 
 ## Install on Windows
 

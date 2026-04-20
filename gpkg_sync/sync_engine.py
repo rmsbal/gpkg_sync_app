@@ -93,6 +93,18 @@ def local_file_accessible(path: Path) -> bool:
         return False
 
 
+def is_managed_artifact(path: Path) -> bool:
+    name = path.name
+    if name.startswith(".") and name.endswith(".part"):
+        return True
+    stem = path.stem
+    return ".backup-" in stem or ".conflict-" in stem
+
+
+def should_sync_local_path(path: Path) -> bool:
+    return path.is_file() and not is_managed_artifact(path)
+
+
 class LocalWatcherHandler(FileSystemEventHandler):
     def __init__(self, on_change: Callable[[Path], None]):
         super().__init__()
@@ -170,6 +182,9 @@ class SyncEngine(QObject):
         self.pending_lock = threading.Lock()
         self.mutex = QMutex()
         self._last_full_remote_scan = 0.0
+        self._watch_roots = [Path(path).resolve() for path in self.profile.effective_watch_dirs()]
+        self._multi_root = len(self._watch_roots) > 1
+        self._watch_root_names = {root.name: root for root in self._watch_roots}
 
     def emit_log(self, level: str, code: str, message: str) -> None:
         self.app_logger.log(level, code, f"[{self.profile.name}] {message}")
@@ -185,9 +200,8 @@ class SyncEngine(QObject):
             self.transport.connect()
             self.emit_log("INFO", "TRANSPORT_CONNECTED", "Connected to remote server.")
             self.status_changed.emit(self.profile.name, "Watching")
-            self.watcher = self.watcher_factory(Path(self.profile.local_dir))
-            self.watcher.file_changed.connect(self.on_local_file_event)
-            self.watcher.start()
+            self.watcher = None
+            self._start_watchers()
             self.scan_timer = QTimer(self)
             self.scan_timer.setInterval(3000)
             self.scan_timer.timeout.connect(self.process_pending_and_poll_remote)
@@ -214,8 +228,9 @@ class SyncEngine(QObject):
             self.scan_timer.deleteLater()
             self.scan_timer = None
         if self.watcher is not None:
-            self.watcher.stop()
-            self.watcher.deleteLater()
+            for watcher in self._iter_watchers():
+                watcher.stop()
+                watcher.deleteLater()
             self.watcher = None
         self.transport.close()
         self.status_changed.emit(self.profile.name, "Stopped")
@@ -236,8 +251,10 @@ class SyncEngine(QObject):
         if not self.running:
             return
         path = Path(path_str)
+        if is_managed_artifact(path):
+            return
         try:
-            rel = safe_relpath(path, Path(self.profile.local_dir))
+            rel = self.relative_remote_path_for_local(path)
             self.emit_log("INFO", "LOCAL_FILE_QUEUED", f"Queued local change: {rel}")
         except ValueError:
             if path.exists():
@@ -275,11 +292,12 @@ class SyncEngine(QObject):
     def full_sync(self) -> None:
         self.emit_log("INFO", "FULL_SYNC_START", "Running full sync.")
         self.status_changed.emit(self.profile.name, "Full sync")
-        local_root = Path(self.profile.local_dir)
-        local_files = [path for path in local_root.rglob("*") if path.is_file()]
+        local_files: List[Path] = []
+        for root in self._watch_roots:
+            local_files.extend(path for path in root.rglob("*") if should_sync_local_path(path))
         remote_files = self.transport.walk_remote_files(self.profile.remote_dir)
         remote_map = {remote_relpath(self.profile.remote_dir, str(item["path"])): item for item in remote_files}
-        local_map = {safe_relpath(path, local_root): path for path in local_files}
+        local_map = {self.relative_remote_path_for_local(path): path for path in local_files}
 
         for rel, local_path in local_map.items():
             self.reconcile_single(local_path, normalize_remote_path(self.profile.remote_dir, rel), remote_map.get(rel))
@@ -287,7 +305,11 @@ class SyncEngine(QObject):
         if self.profile.direction in {"download-only", "two-way"}:
             for rel, remote_info in remote_map.items():
                 if rel not in local_map:
-                    self.handle_remote_only(local_root / rel, remote_info)
+                    local_path = self.local_path_from_remote_rel(rel)
+                    if local_path is None:
+                        self.emit_log("WARNING", "REMOTE_PATH_SKIPPED", f"Skipping unmapped remote file: {rel}")
+                        continue
+                    self.handle_remote_only(local_path, remote_info)
 
         self.status_changed.emit(self.profile.name, "Watching")
         self.emit_log("INFO", "FULL_SYNC_DONE", "Full sync complete.")
@@ -296,10 +318,12 @@ class SyncEngine(QObject):
         if self.profile.direction == "upload-only":
             return
         self.emit_log("INFO", "REMOTE_POLL", "Polling remote changes.")
-        local_root = Path(self.profile.local_dir)
         for remote_info in self.transport.walk_remote_files(self.profile.remote_dir):
             rel = remote_relpath(self.profile.remote_dir, str(remote_info["path"]))
-            local_path = local_root / rel
+            local_path = self.local_path_from_remote_rel(rel)
+            if local_path is None:
+                self.emit_log("WARNING", "REMOTE_PATH_SKIPPED", f"Skipping unmapped remote file: {rel}")
+                continue
             if not local_path.exists():
                 self.handle_remote_only(local_path, remote_info)
                 continue
@@ -309,7 +333,7 @@ class SyncEngine(QObject):
         local_stat = local_path.stat()
         local_mtime = float(local_stat.st_mtime)
         local_size = int(local_stat.st_size)
-        rel = safe_relpath(local_path, Path(self.profile.local_dir))
+        rel = self.relative_remote_path_for_local(local_path)
 
         if remote_info is None:
             try:
@@ -330,6 +354,13 @@ class SyncEngine(QObject):
         last_remote = float(state["remote_mtime"]) if state and state["remote_mtime"] else None
         local_changed = last_local is None or local_mtime != last_local or local_size != int(state["local_size"] or 0)
         remote_changed = last_remote is None or remote_mtime != last_remote or remote_size != int(state["remote_size"] or 0)
+
+        if local_changed and remote_changed:
+            last_hash = state["last_synced_hash"] if state else None
+            local_hash = sha1_file(local_path)
+            if last_hash and local_hash == last_hash:
+                local_changed = False
+                self.emit_log("INFO", "LOCAL_HASH_MATCH", f"Local content unchanged since last sync: {rel}")
 
         if not local_changed and not remote_changed:
             return
@@ -353,10 +384,12 @@ class SyncEngine(QObject):
             )
 
     def sync_local_change(self, local_path: Path) -> None:
+        if local_path.exists() and is_managed_artifact(local_path):
+            return
         if not local_path.exists():
             if not self.profile.delete_missing:
                 return
-            rel = safe_relpath(local_path, Path(self.profile.local_dir))
+            rel = self.relative_remote_path_for_local(local_path)
             remote_path = normalize_remote_path(self.profile.remote_dir, rel)
             if self.profile.direction in {"upload-only", "two-way"} and self.transport.exists(remote_path):
                 self.emit_log("WARNING", "REMOTE_DELETE", f"Deleting remote file: {rel}")
@@ -375,7 +408,7 @@ class SyncEngine(QObject):
                 self.pending_files[str(local_path)] = now_ts()
             return
 
-        rel = safe_relpath(local_path, Path(self.profile.local_dir))
+        rel = self.relative_remote_path_for_local(local_path)
         remote_path = normalize_remote_path(self.profile.remote_dir, rel)
         try:
             remote_stat = self.transport.stat(remote_path)
@@ -385,7 +418,7 @@ class SyncEngine(QObject):
         self.reconcile_single(local_path, remote_path, remote_info)
 
     def resolve_conflict(self, local_path: Path, remote_path: str, remote_mtime: float, remote_size: int) -> None:
-        rel = safe_relpath(local_path, Path(self.profile.local_dir))
+        rel = self.relative_remote_path_for_local(local_path)
         conflict_path = make_conflict_name(local_path, self.profile.device_label)
         while conflict_path.exists():
             conflict_path = make_conflict_name(conflict_path, self.profile.device_label)
@@ -406,7 +439,7 @@ class SyncEngine(QObject):
         )
 
     def upload_local_file(self, local_path: Path, remote_path: str, reason: str) -> None:
-        rel = safe_relpath(local_path, Path(self.profile.local_dir))
+        rel = self.relative_remote_path_for_local(local_path)
         self.status_changed.emit(self.profile.name, f"Uploading {local_path.name}")
         self.emit_log("INFO", "UPLOAD_START", f"Uploading {rel} ({reason})")
         total = max(1, local_path.stat().st_size)
@@ -447,7 +480,7 @@ class SyncEngine(QObject):
     def download_remote_file(self, remote_path: str, local_path: Path, remote_mtime: float, remote_size: int, reason: str) -> None:
         rel = local_path.name
         with contextlib.suppress(ValueError):
-            rel = safe_relpath(local_path, Path(self.profile.local_dir))
+            rel = self.relative_remote_path_for_local(local_path)
         self.status_changed.emit(self.profile.name, f"Downloading {local_path.name}")
         self.emit_log("INFO", "DOWNLOAD_START", f"Downloading {rel} ({reason})")
 
@@ -496,3 +529,51 @@ class SyncEngine(QObject):
             return True, "Connection successful."
         except Exception as exc:
             return False, str(exc)
+
+    def _start_watchers(self) -> None:
+        watchers: List[FolderWatcher] = []
+        for root in self._watch_roots:
+            watcher = self.watcher_factory(root)
+            watcher.file_changed.connect(self.on_local_file_event)
+            watcher.start()
+            watchers.append(watcher)
+        if not watchers:
+            raise RuntimeError("No watch folders are configured.")
+        self.watcher = watchers[0] if len(watchers) == 1 else watchers
+
+    def _iter_watchers(self) -> List[FolderWatcher]:
+        if self.watcher is None:
+            return []
+        if isinstance(self.watcher, list):
+            return self.watcher
+        return [self.watcher]
+
+    def _root_for_local_path(self, local_path: Path) -> Path:
+        resolved = local_path.resolve(strict=False)
+        for root in self._watch_roots:
+            try:
+                resolved.relative_to(root)
+                return root
+            except ValueError:
+                continue
+        raise ValueError(f"Path is outside configured watch roots: {local_path}")
+
+    def relative_remote_path_for_local(self, local_path: Path) -> str:
+        root = self._root_for_local_path(local_path)
+        rel = safe_relpath(local_path, root)
+        if not self._multi_root:
+            return rel
+        return str(PurePosixPath(root.name) / PurePosixPath(rel)).replace("\\", "/")
+
+    def local_path_from_remote_rel(self, rel: str) -> Optional[Path]:
+        rel_path = PurePosixPath(rel)
+        if not self._multi_root:
+            return self._watch_roots[0] / Path(str(rel_path))
+        parts = rel_path.parts
+        if not parts:
+            return None
+        root = self._watch_root_names.get(parts[0])
+        if root is None:
+            return None
+        nested = PurePosixPath(*parts[1:]) if len(parts) > 1 else PurePosixPath()
+        return root / Path(str(nested))

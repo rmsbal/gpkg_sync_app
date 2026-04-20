@@ -77,13 +77,17 @@ class ConfigTests(unittest.TestCase):
 
     def test_save_profiles_moves_password_to_keyring(self):
         profile = self.make_profile()
+        profile.watch_dirs = [str(self.local_dir), str(self.base / "archive")]
+        (self.base / "archive").mkdir()
         self.store.save_profiles([profile])
         payload = json.loads(self.config_path.read_text(encoding="utf-8"))
         self.assertEqual(payload["version"], CONFIG_VERSION)
         self.assertNotIn("password", payload["profiles"][0])
         self.assertTrue(payload["profiles"][0]["has_saved_password"])
+        self.assertEqual(payload["profiles"][0]["watch_dirs"], [str(self.local_dir), str(self.base / "archive")])
         loaded = self.store.load_profiles()
         self.assertEqual(loaded[0].password, "secret")
+        self.assertEqual(loaded[0].effective_watch_dirs(), [str(self.local_dir), str(self.base / "archive")])
 
     def test_legacy_config_is_migrated(self):
         legacy = [
@@ -113,3 +117,14 @@ class ConfigTests(unittest.TestCase):
         store = SettingsStore(self.config_path, SecretStore("test-gpkg"))
         with self.assertRaises(SecretStoreError):
             store.save_profiles([self.make_profile()])
+
+    def test_profile_validation_rejects_duplicate_watch_folder_names(self):
+        left = self.base / "one" / "shared"
+        right = self.base / "two" / "shared"
+        left.mkdir(parents=True)
+        right.mkdir(parents=True)
+        profile = self.make_profile()
+        profile.watch_dirs = [str(left), str(right)]
+        ok, message = profile.validate()
+        self.assertFalse(ok)
+        self.assertIn("unique folder names", message)

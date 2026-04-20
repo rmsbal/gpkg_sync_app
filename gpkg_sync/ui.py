@@ -73,7 +73,8 @@ class ProfileDialog(QDialog):
         self.password_edit = QLineEdit()
         self.password_edit.setEchoMode(QLineEdit.Password)
         self.key_path_edit = QLineEdit()
-        self.local_dir_edit = QLineEdit()
+        self.watch_dirs_list = QListWidget()
+        self.watch_dirs_list.setSelectionMode(QListWidget.SingleSelection)
         self.remote_dir_edit = QLineEdit()
         self.direction_combo = QComboBox()
         self.direction_combo.addItems(["upload-only", "download-only", "two-way"])
@@ -88,15 +89,21 @@ class ProfileDialog(QDialog):
 
         browse_key_btn = QPushButton("Browse")
         browse_key_btn.clicked.connect(self._browse_key)
-        browse_local_btn = QPushButton("Browse")
-        browse_local_btn.clicked.connect(self._browse_local)
+        add_watch_btn = QPushButton("Add folder")
+        add_watch_btn.clicked.connect(self._browse_local)
+        remove_watch_btn = QPushButton("Remove selected")
+        remove_watch_btn.clicked.connect(self._remove_selected_watch_dir)
 
         key_layout = QHBoxLayout()
         key_layout.addWidget(self.key_path_edit)
         key_layout.addWidget(browse_key_btn)
-        local_layout = QHBoxLayout()
-        local_layout.addWidget(self.local_dir_edit)
-        local_layout.addWidget(browse_local_btn)
+        watch_dir_buttons = QHBoxLayout()
+        watch_dir_buttons.addWidget(add_watch_btn)
+        watch_dir_buttons.addWidget(remove_watch_btn)
+        watch_dir_buttons.addStretch(1)
+        watch_dirs_layout = QVBoxLayout()
+        watch_dirs_layout.addWidget(self.watch_dirs_list)
+        watch_dirs_layout.addLayout(watch_dir_buttons)
 
         form.addRow("Profile name", self.name_edit)
         form.addRow("Host", self.host_edit)
@@ -105,7 +112,7 @@ class ProfileDialog(QDialog):
         form.addRow("Username", self.username_edit)
         form.addRow("Password", self.password_edit)
         form.addRow("SSH key", self._wrap_layout(key_layout))
-        form.addRow("Local folder", self._wrap_layout(local_layout))
+        form.addRow("Watch folders", self._wrap_layout(watch_dirs_layout))
         form.addRow("Remote folder", self.remote_dir_edit)
         form.addRow("Direction", self.direction_combo)
         form.addRow("Device label", self.device_label_edit)
@@ -129,7 +136,7 @@ class ProfileDialog(QDialog):
         layout.addLayout(buttons)
         self.resize(640, 420)
 
-    def _wrap_layout(self, layout: QHBoxLayout) -> QWidget:
+    def _wrap_layout(self, layout) -> QWidget:
         widget = QWidget()
         widget.setLayout(layout)
         return widget
@@ -146,8 +153,13 @@ class ProfileDialog(QDialog):
 
     def _browse_local(self) -> None:
         path = QFileDialog.getExistingDirectory(self, "Choose Local Folder")
-        if path:
-            self.local_dir_edit.setText(path)
+        if path and not self._has_watch_dir(path):
+            self.watch_dirs_list.addItem(path)
+
+    def _remove_selected_watch_dir(self) -> None:
+        row = self.watch_dirs_list.currentRow()
+        if row >= 0:
+            self.watch_dirs_list.takeItem(row)
 
     def _load(self, profile: SyncProfile) -> None:
         self.name_edit.setText(profile.name)
@@ -157,7 +169,7 @@ class ProfileDialog(QDialog):
         self.username_edit.setText(profile.username)
         self.password_edit.setText(profile.password)
         self.key_path_edit.setText(profile.key_path)
-        self.local_dir_edit.setText(profile.local_dir)
+        self._set_watch_dirs(profile.effective_watch_dirs())
         self.remote_dir_edit.setText(profile.remote_dir)
         self.direction_combo.setCurrentText(profile.direction)
         self.auto_start_check.setChecked(profile.auto_start)
@@ -167,6 +179,7 @@ class ProfileDialog(QDialog):
         self.stability_spin.setValue(profile.stability_wait_seconds)
 
     def _collect(self) -> SyncProfile:
+        watch_dirs = self._watch_dirs()
         return SyncProfile(
             name=self.name_edit.text().strip(),
             host=self.host_edit.text().strip(),
@@ -175,7 +188,8 @@ class ProfileDialog(QDialog):
             username=self.username_edit.text().strip(),
             password=self.password_edit.text(),
             key_path=self.key_path_edit.text().strip(),
-            local_dir=self.local_dir_edit.text().strip(),
+            local_dir=watch_dirs[0] if watch_dirs else "",
+            watch_dirs=watch_dirs,
             remote_dir=self.remote_dir_edit.text().strip(),
             direction=self.direction_combo.currentText(),
             auto_start=self.auto_start_check.isChecked(),
@@ -184,6 +198,22 @@ class ProfileDialog(QDialog):
             device_label=self.device_label_edit.text().strip() or "device",
             stability_wait_seconds=int(self.stability_spin.value()),
         )
+
+    def _watch_dirs(self) -> List[str]:
+        return [self.watch_dirs_list.item(index).text().strip() for index in range(self.watch_dirs_list.count()) if self.watch_dirs_list.item(index).text().strip()]
+
+    def _set_watch_dirs(self, watch_dirs: List[str]) -> None:
+        self.watch_dirs_list.clear()
+        for watch_dir in watch_dirs:
+            self.watch_dirs_list.addItem(watch_dir)
+
+    def _has_watch_dir(self, path: str) -> bool:
+        normalized = str(Path(path).resolve())
+        for index in range(self.watch_dirs_list.count()):
+            item = self.watch_dirs_list.item(index)
+            if str(Path(item.text()).resolve()) == normalized:
+                return True
+        return False
 
     def _test_connection(self) -> None:
         profile = self._collect()
@@ -275,13 +305,14 @@ class MainWindow(QMainWindow):
         self.status_value = QLabel("Idle")
         self.profile_name_value = QLabel("-")
         self.local_dir_value = QLabel("-")
+        self.local_dir_value.setWordWrap(True)
         self.remote_dir_value = QLabel("-")
         self.direction_value = QLabel("-")
         self.progress_bar = QProgressBar()
         self.progress_bar.setRange(0, 100)
         self.progress_bar.setValue(0)
         status_layout.addRow("Profile", self.profile_name_value)
-        status_layout.addRow("Local folder", self.local_dir_value)
+        status_layout.addRow("Watch folders", self.local_dir_value)
         status_layout.addRow("Remote folder", self.remote_dir_value)
         status_layout.addRow("Direction", self.direction_value)
         status_layout.addRow("Engine status", self.status_value)
@@ -366,7 +397,7 @@ class MainWindow(QMainWindow):
             return
         self.current_profile_name = profile.name
         self.profile_name_value.setText(profile.name)
-        self.local_dir_value.setText(profile.local_dir)
+        self.local_dir_value.setText("\n".join(profile.effective_watch_dirs()) or "-")
         self.remote_dir_value.setText(profile.remote_dir)
         self.direction_value.setText(profile.direction)
         self.status_value.setText("Running" if profile.name in self.engines else "Stopped")
