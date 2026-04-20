@@ -8,7 +8,6 @@ from typing import Any, Dict, Optional, Tuple
 
 APP_NAME = "gpkg sync"
 APP_VERSION = "0.1.0"
-SYNC_EXTENSIONS = {".gpkg"}
 DEFAULT_PORTS = {
     "sftp": 22,
     "ftp": 21,

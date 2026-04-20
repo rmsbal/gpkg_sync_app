@@ -1,6 +1,6 @@
 # gpkg sync
 
-Desktop app for syncing `.gpkg` files between a local folder and a remote SFTP, FTP, or FTPS location.
+Desktop app for syncing files between a local folder and a remote SFTP, FTP, or FTPS location.
 
 ## Install on Linux
 

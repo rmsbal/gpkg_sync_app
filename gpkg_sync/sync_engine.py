@@ -14,7 +14,7 @@ from watchdog.events import FileSystemEventHandler
 from watchdog.observers import Observer
 
 from .logging_utils import AppLogger
-from .models import SYNC_EXTENSIONS, SyncProfile
+from .models import SyncProfile
 from .storage import StateDB, now_ts
 from .transports import FileTransport, transport_for_profile
 
@@ -38,10 +38,6 @@ def sha1_file(path: Path, chunk_size: int = 1024 * 1024) -> str:
     return digest.hexdigest()
 
 
-def is_gpkg(path: Path) -> bool:
-    return path.suffix.lower() in SYNC_EXTENSIONS
-
-
 def safe_relpath(file_path: Path, root: Path) -> str:
     return str(file_path.resolve().relative_to(root.resolve())).replace("\\", "/")
 
@@ -58,6 +54,10 @@ def make_backup_name(path: Path) -> Path:
 
 def normalize_remote_path(remote_root: str, rel: str) -> str:
     return str(PurePosixPath(remote_root) / PurePosixPath(rel)).replace("\\", "/")
+
+
+def remote_relpath(remote_root: str, remote_path: str) -> str:
+    return str(PurePosixPath(remote_path).relative_to(PurePosixPath(remote_root))).replace("\\", "/")
 
 
 def file_snapshot(path: Path) -> Optional[tuple[int, float]]:
@@ -100,8 +100,7 @@ class LocalWatcherHandler(FileSystemEventHandler):
 
     def _handle(self, path_str: str) -> None:
         path = Path(path_str)
-        if is_gpkg(path):
-            self.on_change(path)
+        self.on_change(path)
 
     def on_created(self, event):
         if not event.is_directory:
@@ -277,9 +276,9 @@ class SyncEngine(QObject):
         self.emit_log("INFO", "FULL_SYNC_START", "Running full sync.")
         self.status_changed.emit(self.profile.name, "Full sync")
         local_root = Path(self.profile.local_dir)
-        local_files = [path for path in local_root.rglob("*") if path.is_file() and is_gpkg(path)]
+        local_files = [path for path in local_root.rglob("*") if path.is_file()]
         remote_files = self.transport.walk_remote_files(self.profile.remote_dir)
-        remote_map = {os.path.relpath(str(item["path"]), self.profile.remote_dir): item for item in remote_files}
+        remote_map = {remote_relpath(self.profile.remote_dir, str(item["path"])): item for item in remote_files}
         local_map = {safe_relpath(path, local_root): path for path in local_files}
 
         for rel, local_path in local_map.items():
@@ -299,7 +298,7 @@ class SyncEngine(QObject):
         self.emit_log("INFO", "REMOTE_POLL", "Polling remote changes.")
         local_root = Path(self.profile.local_dir)
         for remote_info in self.transport.walk_remote_files(self.profile.remote_dir):
-            rel = os.path.relpath(str(remote_info["path"]), self.profile.remote_dir)
+            rel = remote_relpath(self.profile.remote_dir, str(remote_info["path"]))
             local_path = local_root / rel
             if not local_path.exists():
                 self.handle_remote_only(local_path, remote_info)

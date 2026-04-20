@@ -9,7 +9,7 @@ from PySide6.QtCore import QCoreApplication
 from gpkg_sync.logging_utils import AppLogger
 from gpkg_sync.models import SyncProfile
 from gpkg_sync.storage import StateDB
-from gpkg_sync.sync_engine import SyncEngine, normalize_remote_path, safe_relpath
+from gpkg_sync.sync_engine import SyncEngine, normalize_remote_path, remote_relpath, safe_relpath
 
 
 class FakeTransport:
@@ -114,6 +114,7 @@ class SyncEngineTests(unittest.TestCase):
         nested.write_text("x", encoding="utf-8")
         self.assertEqual(safe_relpath(nested, self.local_dir), "a/b.gpkg")
         self.assertEqual(normalize_remote_path("/remote", "a/b.gpkg"), "/remote/a/b.gpkg")
+        self.assertEqual(remote_relpath("/remote", "/remote/a/b.gpkg"), "a/b.gpkg")
 
     def test_download_is_atomic(self):
         target = self.local_dir / "remote.gpkg"
@@ -148,3 +149,39 @@ class SyncEngineTests(unittest.TestCase):
         self.engine.request_stop()
         self.engine.request_stop()
         self.assertFalse(self.engine.running)
+
+    def test_full_sync_uploads_nested_local_file(self):
+        nested = self.local_dir / "projects" / "roads.gpkg"
+        nested.parent.mkdir(parents=True)
+        nested.write_text("nested", encoding="utf-8")
+
+        self.engine.full_sync()
+
+        self.assertIn("/remote/projects/roads.gpkg", self.transport.files)
+
+    def test_full_sync_downloads_nested_remote_file(self):
+        self.transport.files["/remote/projects/roads.gpkg"] = (12, 10.0)
+
+        self.engine.full_sync()
+
+        target = self.local_dir / "projects" / "roads.gpkg"
+        self.assertTrue(target.exists())
+        self.assertEqual(target.read_bytes(), b"remote-bytes")
+
+    def test_full_sync_uploads_non_gpkg_file(self):
+        nested = self.local_dir / "docs" / "notes.txt"
+        nested.parent.mkdir(parents=True)
+        nested.write_text("hello", encoding="utf-8")
+
+        self.engine.full_sync()
+
+        self.assertIn("/remote/docs/notes.txt", self.transport.files)
+
+    def test_full_sync_downloads_file_without_extension(self):
+        self.transport.files["/remote/config/README"] = (12, 10.0)
+
+        self.engine.full_sync()
+
+        target = self.local_dir / "config" / "README"
+        self.assertTrue(target.exists())
+        self.assertEqual(target.read_bytes(), b"remote-bytes")

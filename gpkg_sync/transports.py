@@ -14,7 +14,7 @@ from typing import Callable, Dict, List, Optional, Protocol
 
 import paramiko
 
-from .models import SYNC_EXTENSIONS, SyncProfile
+from .models import SyncProfile
 
 
 Callback = Optional[Callable[[int, int], None]]
@@ -123,7 +123,7 @@ class SFTPManager:
                 child = posixpath.join(path, entry.filename)
                 if stat.S_ISDIR(entry.st_mode):
                     _walk(child)
-                elif Path(entry.filename).suffix.lower() in SYNC_EXTENSIONS:
+                else:
                     found.append({"path": child, "size": entry.st_size, "mtime": entry.st_mtime})
 
         try:
@@ -265,7 +265,7 @@ class FTPManager:
                     path = posixpath.join(remote_root, name)
                     if facts.get("type") == "dir":
                         found.extend(self.walk_remote_files(path))
-                    elif facts.get("type") == "file" and Path(name).suffix.lower() in SYNC_EXTENSIONS:
+                    elif facts.get("type") == "file":
                         modify = facts.get("modify")
                         mtime = 0.0
                         if modify:
@@ -290,11 +290,10 @@ class FTPManager:
                         _walk(candidate)
                         self.ftp.cwd(path)  # type: ignore[union-attr]
                     except ftplib.all_errors:
-                        if Path(name).suffix.lower() in SYNC_EXTENSIONS:
-                            size = 0
-                            with contextlib.suppress(ftplib.all_errors):
-                                size = self.ftp.size(candidate) or 0  # type: ignore[union-attr]
-                            found.append({"path": candidate, "size": size, "mtime": 0.0})
+                        size = 0
+                        with contextlib.suppress(ftplib.all_errors):
+                            size = self.ftp.size(candidate) or 0  # type: ignore[union-attr]
+                        found.append({"path": candidate, "size": size, "mtime": 0.0})
 
             _walk(remote_root)
 
