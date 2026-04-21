@@ -37,6 +37,7 @@ from PySide6.QtWidgets import (
 
 from .logging_utils import AppLogger
 from .models import APP_NAME, APP_VERSION, DEFAULT_PORTS, SyncProfile, default_device_label
+from .startup import StartupError, StartupManager
 from .storage import ConfigError, SecretStore, SecretStoreError, SettingsStore, StateDB
 from .sync_engine import SyncEngine, fmt_ts
 
@@ -308,10 +309,13 @@ class MainWindow(QMainWindow):
         self.threads: Dict[str, QThread] = {}
         self.current_profile_name: Optional[str] = None
         self.tray: Optional[QSystemTrayIcon] = None
+        self.startup_manager = StartupManager()
+        self._loading_startup_check = False
         self.setWindowTitle(f"{APP_NAME} {APP_VERSION}")
         self.resize(1100, 760)
         self._build_ui()
         self._build_tray()
+        self._load_startup_option()
         self._load_profiles()
         self._load_profiles_ui()
         self._load_logs()
@@ -329,6 +333,13 @@ class MainWindow(QMainWindow):
         root = QHBoxLayout(central)
 
         left_box = QVBoxLayout()
+        app_group = QGroupBox("App")
+        app_layout = QVBoxLayout(app_group)
+        self.run_on_startup_check = QCheckBox("Run app when I sign in")
+        self.run_on_startup_check.stateChanged.connect(self.toggle_run_on_startup)
+        app_layout.addWidget(self.run_on_startup_check)
+        left_box.addWidget(app_group)
+
         profile_group = QGroupBox("Profiles")
         profile_layout = QVBoxLayout(profile_group)
         self.profile_list = QListWidget()
@@ -403,6 +414,34 @@ class MainWindow(QMainWindow):
         root.addLayout(left_box, 1)
         root.addLayout(right_box, 3)
         self.setCentralWidget(central)
+
+    def _load_startup_option(self) -> None:
+        self._loading_startup_check = True
+        try:
+            supported = self.startup_manager.is_supported()
+            self.run_on_startup_check.setEnabled(supported)
+            if supported:
+                self.run_on_startup_check.setChecked(self.startup_manager.is_enabled())
+            else:
+                self.run_on_startup_check.setToolTip("Run on startup is supported on Linux and Windows.")
+        except StartupError as exc:
+            self.run_on_startup_check.setEnabled(False)
+            self.run_on_startup_check.setToolTip(str(exc))
+            self.logger.log("WARNING", "startup", str(exc))
+        finally:
+            self._loading_startup_check = False
+
+    def toggle_run_on_startup(self, _state: int = 0) -> None:
+        if self._loading_startup_check:
+            return
+        enabled = self.run_on_startup_check.isChecked()
+        try:
+            self.startup_manager.set_enabled(enabled)
+        except StartupError as exc:
+            self._loading_startup_check = True
+            self.run_on_startup_check.setChecked(not enabled)
+            self._loading_startup_check = False
+            QMessageBox.critical(self, APP_NAME, str(exc))
 
     def _build_tray(self) -> None:
         if not QSystemTrayIcon.isSystemTrayAvailable():

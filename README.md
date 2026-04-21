@@ -74,6 +74,7 @@ OAuth token caches for Google Drive and OneDrive are stored in `~/.gpkg_sync` af
 - When a profile has one watch folder, files sync directly into the configured remote folder.
 - When a profile has multiple watch folders, each local folder is namespaced on the remote side by its folder name to avoid collisions.
 - App-managed temporary and conflict artifacts such as `.part`, `.backup-*`, and `.conflict-*` files are excluded from sync to prevent feedback loops.
+- Enable **Run app when I sign in** in the app to launch gpkg sync automatically after desktop login. Profile-level **Start syncing when app opens** still controls which profiles begin syncing after launch.
 
 ## Install on Windows
 
