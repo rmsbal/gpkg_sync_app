@@ -4,6 +4,7 @@ import contextlib
 import os
 import shutil
 import threading
+import time
 import traceback
 from datetime import datetime
 from pathlib import Path, PurePosixPath
@@ -25,16 +26,42 @@ def fmt_ts(ts: Optional[float]) -> str:
     return datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M:%S")
 
 
-def sha1_file(path: Path, chunk_size: int = 1024 * 1024) -> str:
+def fmt_size(num_bytes: int) -> str:
+    units = ["B", "KB", "MB", "GB", "TB"]
+    value = float(max(0, num_bytes))
+    for unit in units:
+        if value < 1024.0 or unit == units[-1]:
+            return f"{value:.1f} {unit}" if unit != "B" else f"{int(value)} B"
+        value /= 1024.0
+    return f"{num_bytes} B"
+
+
+def fmt_duration(seconds: float) -> str:
+    total_seconds = max(0, int(seconds))
+    minutes, secs = divmod(total_seconds, 60)
+    hours, minutes = divmod(minutes, 60)
+    if hours:
+        return f"{hours}h {minutes}m"
+    if minutes:
+        return f"{minutes}m {secs}s"
+    return f"{secs}s"
+
+
+def sha1_file(path: Path, chunk_size: int = 1024 * 1024, progress: Optional[Callable[[int, int], None]] = None) -> str:
     import hashlib
 
     digest = hashlib.sha1()
+    total = max(1, path.stat().st_size)
+    done = 0
     with path.open("rb") as handle:
         while True:
             chunk = handle.read(chunk_size)
             if not chunk:
                 break
             digest.update(chunk)
+            done += len(chunk)
+            if progress:
+                progress(done, total)
     return digest.hexdigest()
 
 
@@ -185,6 +212,33 @@ class SyncEngine(QObject):
         self._watch_roots = [Path(path).resolve() for path in self.profile.effective_watch_dirs()]
         self._multi_root = len(self._watch_roots) > 1
         self._watch_root_names = {root.name: root for root in self._watch_roots}
+
+    def _emit_transfer_progress(
+        self,
+        rel: str,
+        phase: str,
+        done: int,
+        total: int,
+        *,
+        started_at: Optional[float] = None,
+        base_pct: int = 0,
+        span_pct: int = 100,
+    ) -> None:
+        safe_total = max(1, total)
+        pct = max(0, min(100, base_pct + int((done / safe_total) * span_pct)))
+        self.progress_changed.emit(self.profile.name, rel, pct)
+        details = f"{fmt_size(done)}/{fmt_size(total)}"
+        if started_at is not None:
+            elapsed = max(0.001, time.monotonic() - started_at)
+            speed = done / elapsed
+            if speed > 0:
+                remaining = max(0, total - done)
+                eta = remaining / speed
+                details = f"{details} at {fmt_size(int(speed))}/s, ETA {fmt_duration(eta)}"
+        self.status_changed.emit(
+            self.profile.name,
+            f"{phase} {Path(rel).name} ({details})",
+        )
 
     def emit_log(self, level: str, code: str, message: str) -> None:
         self.app_logger.log(level, code, f"[{self.profile.name}] {message}")
@@ -398,12 +452,14 @@ class SyncEngine(QObject):
 
         if not is_file_stable(local_path, delay=1.0):
             self.emit_log("INFO", "FILE_UNSTABLE", f"Waiting for stable file: {local_path.name}")
+            self.status_changed.emit(self.profile.name, f"Waiting for stable file {local_path.name}")
             with self.pending_lock:
                 self.pending_files[str(local_path)] = now_ts()
             return
 
         if not local_file_accessible(local_path):
             self.emit_log("INFO", "FILE_LOCKED", f"File still in use: {local_path.name}")
+            self.status_changed.emit(self.profile.name, f"Waiting for file lock {local_path.name}")
             with self.pending_lock:
                 self.pending_files[str(local_path)] = now_ts()
             return
@@ -443,14 +499,16 @@ class SyncEngine(QObject):
         self.status_changed.emit(self.profile.name, f"Uploading {local_path.name}")
         self.emit_log("INFO", "UPLOAD_START", f"Uploading {rel} ({reason})")
         total = max(1, local_path.stat().st_size)
+        transfer_started_at = time.monotonic()
 
         def callback(sent: int, _total: int) -> None:
-            pct = max(0, min(100, int((sent / total) * 100)))
-            self.progress_changed.emit(self.profile.name, rel, pct)
+            self._emit_transfer_progress(rel, "Uploading", sent, total, started_at=transfer_started_at, base_pct=0, span_pct=90)
 
         self.transport.upload(local_path, remote_path, callback=callback)
         remote_stat = self.transport.stat(remote_path)
         local_stat = local_path.stat()
+        self.status_changed.emit(self.profile.name, f"Verifying upload {local_path.name}")
+        verify_started_at = time.monotonic()
         self.db.upsert_file_state(
             self.profile.name,
             str(local_path),
@@ -459,7 +517,18 @@ class SyncEngine(QObject):
             float(remote_stat.st_mtime),
             int(local_stat.st_size),
             int(remote_stat.st_size),
-            sha1_file(local_path),
+            sha1_file(
+                local_path,
+                progress=lambda done, total_hash: self._emit_transfer_progress(
+                    rel,
+                    "Verifying",
+                    done,
+                    total_hash,
+                    started_at=verify_started_at,
+                    base_pct=90,
+                    span_pct=10,
+                ),
+            ),
             "synced",
             "",
         )
@@ -470,10 +539,10 @@ class SyncEngine(QObject):
 
     def _download_to_temp(self, remote_path: str, temp_path: Path, remote_size: int, rel: str) -> None:
         total = max(1, remote_size)
+        transfer_started_at = time.monotonic()
 
         def callback(done: int, _total: int) -> None:
-            pct = max(0, min(100, int((done / total) * 100)))
-            self.progress_changed.emit(self.profile.name, rel, pct)
+            self._emit_transfer_progress(rel, "Downloading", done, total, started_at=transfer_started_at, base_pct=0, span_pct=90)
 
         self.transport.download(remote_path, temp_path, callback=callback)
 
@@ -504,6 +573,8 @@ class SyncEngine(QObject):
         with contextlib.suppress(Exception):
             os.utime(local_path, (remote_mtime, remote_mtime))
         local_stat = local_path.stat()
+        self.status_changed.emit(self.profile.name, f"Verifying download {local_path.name}")
+        verify_started_at = time.monotonic()
         self.db.upsert_file_state(
             self.profile.name,
             str(local_path),
@@ -512,7 +583,18 @@ class SyncEngine(QObject):
             remote_mtime,
             int(local_stat.st_size),
             remote_size,
-            sha1_file(local_path),
+            sha1_file(
+                local_path,
+                progress=lambda done, total_hash: self._emit_transfer_progress(
+                    rel,
+                    "Verifying",
+                    done,
+                    total_hash,
+                    started_at=verify_started_at,
+                    base_pct=90,
+                    span_pct=10,
+                ),
+            ),
             "synced" if reason != "conflict copy" else "conflict-copy",
             "",
         )

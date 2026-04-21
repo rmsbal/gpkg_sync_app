@@ -29,6 +29,10 @@ class RuntimeAndPackagingTests(unittest.TestCase):
         cmd_text = (ROOT / "cmd").read_text(encoding="utf-8")
         spec_text = (ROOT / "gpkgSyncApp.spec").read_text(encoding="utf-8")
         self.assertIn("AppRun", cmd_text)
+        self.assertIn('SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"', cmd_text)
+        self.assertIn('APP_VERSION="${APP_VERSION:-1.2}"', cmd_text)
+        self.assertIn('ARTIFACT_NAME="${ARTIFACT_NAME:-gpkg_sync-${APP_VERSION}-${APPIMAGE_ARCH}.AppImage}"', cmd_text)
+        self.assertIn('find "$TMP_OUTPUT_DIR" -maxdepth 1 -type f -name \'*.AppImage\'', cmd_text)
         self.assertIn("collect_all('PySide6')", spec_text)
         subprocess.run(["bash", "-n", str(ROOT / "cmd")], check=True)
 

@@ -5,13 +5,17 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+from .oauth import google_oauth_setup_hint, has_google_oauth_config
+
 
 APP_NAME = "gpkg sync"
-APP_VERSION = "0.1.0"
+APP_VERSION = "1.2"
 DEFAULT_PORTS = {
     "sftp": 22,
     "ftp": 21,
     "ftps": 21,
+    "google-drive": 0,
+    "onedrive": 0,
 }
 
 
@@ -27,11 +31,15 @@ class SyncProfile:
     username: str
     password: str = ""
     key_path: str = ""
+    credentials_path: str = ""
+    client_id: str = ""
+    tenant_id: str = ""
     protocol: str = "sftp"
     local_dir: str = ""
     watch_dirs: List[str] = field(default_factory=list)
     remote_dir: str = ""
     direction: str = "two-way"
+    enabled: bool = True
     auto_start: bool = False
     backup_before_overwrite: bool = True
     delete_missing: bool = False
@@ -42,10 +50,6 @@ class SyncProfile:
     def validate(self) -> Tuple[bool, str]:
         if not self.name.strip():
             return False, "Profile name is required."
-        if not self.host.strip():
-            return False, "Host is required."
-        if not self.username.strip():
-            return False, "Username is required."
         watch_dirs = self.effective_watch_dirs()
         if not watch_dirs:
             return False, "At least one local watch folder is required."
@@ -62,19 +66,31 @@ class SyncProfile:
         if len(folder_names) > 1 and len(set(folder_names)) != len(folder_names):
             return False, "Watch folders must have unique folder names."
         protocol = self.protocol.lower()
-        if protocol not in {"sftp", "ftp", "ftps"}:
+        if protocol not in {"sftp", "ftp", "ftps", "google-drive", "onedrive"}:
             return False, "Invalid protocol."
         if self.direction not in {"upload-only", "download-only", "two-way"}:
             return False, "Invalid sync direction."
         if self.stability_wait_seconds < 2:
             return False, "Stability wait must be at least 2 seconds."
+        if protocol in {"sftp", "ftp", "ftps"} and not self.host.strip():
+            return False, "Host is required."
+        if protocol in {"sftp", "ftp", "ftps"} and not self.username.strip():
+            return False, "Username is required."
         if protocol == "sftp":
             if not self.password and not self.key_path:
                 return False, "Provide either password or SSH key path."
             if self.key_path and not Path(self.key_path).exists():
                 return False, "SSH key path does not exist."
-        elif not self.password and self.username.lower() != "anonymous":
+        elif protocol in {"ftp", "ftps"} and not self.password and self.username.lower() != "anonymous":
             return False, "Password is required for FTP/FTPS."
+        elif protocol == "google-drive":
+            if not has_google_oauth_config():
+                return False, google_oauth_setup_hint()
+        elif protocol == "onedrive":
+            if not self.client_id.strip():
+                return False, "Client ID is required for OneDrive."
+            if not self.tenant_id.strip():
+                return False, "Tenant ID is required for OneDrive."
         return True, ""
 
     def effective_watch_dirs(self) -> List[str]:
@@ -91,6 +107,7 @@ class SyncProfile:
         data.setdefault("device_label", default_device_label())
         data.setdefault("stability_wait_seconds", 5)
         data.setdefault("protocol", "sftp")
+        data.setdefault("enabled", True)
         if not data.get("port"):
             data["port"] = DEFAULT_PORTS.get(data["protocol"], 22)
         watch_dirs = data.get("watch_dirs") or []

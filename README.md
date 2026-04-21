@@ -1,6 +1,8 @@
 # gpkg sync
 
-Desktop app for syncing files between one or more local watch folders and a remote SFTP, FTP, or FTPS location.
+Desktop app for syncing files between one or more local watch folders and a remote SFTP, FTP, FTPS, Google Drive, or OneDrive location.
+
+Current app version: `1.2`
 
 ## Install on Linux
 
@@ -8,21 +10,29 @@ Desktop app for syncing files between one or more local watch folders and a remo
 
 Use the AppImage:
 
-`gpkg_sync-x86_64.AppImage`
+`gpkg_sync-1.2-x86_64.AppImage`
+
+### Run from source
+
+Create or activate a virtual environment, then install the runtime dependencies:
+
+```bash
+python3 -m pip install -r requirements.txt
+```
 
 ### Install steps
 
-1. Download or copy `gpkg_sync-x86_64.AppImage` to your Linux machine.
+1. Download or copy `gpkg_sync-1.2-x86_64.AppImage` to your Linux machine.
 2. Make it executable:
 
    ```bash
-   chmod +x gpkg_sync-x86_64.AppImage
+   chmod +x gpkg_sync-1.2-x86_64.AppImage
    ```
 
 3. Run it:
 
    ```bash
-   ./gpkg_sync-x86_64.AppImage
+   ./gpkg_sync-1.2-x86_64.AppImage
    ```
 
 ### Linux runtime requirements
@@ -48,6 +58,15 @@ That folder contains:
 - `gpkg_sync.db` for sync state and logs
 
 Passwords are stored in the OS keychain, not in `profiles.json`.
+
+OAuth token caches for Google Drive and OneDrive are stored in `~/.gpkg_sync` after the first successful sign-in.
+
+### Cloud drive setup
+
+- `google-drive`: choose Google Drive in the app, then sign in through your browser the first time the profile connects.
+- The app-level Google OAuth client can be provided in `~/.gpkg_sync/google_oauth_client.json` or in a project `.env` file with `GPKG_SYNC_GOOGLE_CLIENT_ID` and `GPKG_SYNC_GOOGLE_CLIENT_SECRET`.
+- `onedrive`: provide an Azure app `Client ID` and `Tenant ID`, then sign in with Microsoft when prompted.
+- For cloud profiles, use a path-like remote folder such as `/Apps/gpkg-sync`.
 
 ### Sync behavior
 
@@ -90,7 +109,7 @@ Run:
 
 Output:
 
-- `gpkg_sync-x86_64.AppImage`
+- `gpkg_sync-1.2-x86_64.AppImage`
 
 ### Build Windows installer
 
@@ -119,7 +138,7 @@ Output:
 Important:
 
 - Running the normal Linux build does not create a Windows `.exe` installer.
-- If you build this project on Linux, you will only see Linux artifacts such as `gpkg_sync-x86_64.AppImage` or `dist/gpkgSyncApp`.
+- If you build this project on Linux, you will only see Linux artifacts such as `gpkg_sync-1.2-x86_64.AppImage` or `dist/gpkgSyncApp`.
 - The Windows installer is only generated after running `build_windows.ps1` on a Windows machine with PyInstaller and Inno Setup installed.
 
 ## Notes

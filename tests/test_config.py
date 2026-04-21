@@ -4,6 +4,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 import keyring
 from keyring.backend import KeyringBackend
@@ -77,6 +78,7 @@ class ConfigTests(unittest.TestCase):
 
     def test_save_profiles_moves_password_to_keyring(self):
         profile = self.make_profile()
+        profile.enabled = False
         profile.watch_dirs = [str(self.local_dir), str(self.base / "archive")]
         (self.base / "archive").mkdir()
         self.store.save_profiles([profile])
@@ -84,9 +86,11 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(payload["version"], CONFIG_VERSION)
         self.assertNotIn("password", payload["profiles"][0])
         self.assertTrue(payload["profiles"][0]["has_saved_password"])
+        self.assertFalse(payload["profiles"][0]["enabled"])
         self.assertEqual(payload["profiles"][0]["watch_dirs"], [str(self.local_dir), str(self.base / "archive")])
         loaded = self.store.load_profiles()
         self.assertEqual(loaded[0].password, "secret")
+        self.assertFalse(loaded[0].enabled)
         self.assertEqual(loaded[0].effective_watch_dirs(), [str(self.local_dir), str(self.base / "archive")])
 
     def test_legacy_config_is_migrated(self):
@@ -128,3 +132,71 @@ class ConfigTests(unittest.TestCase):
         ok, message = profile.validate()
         self.assertFalse(ok)
         self.assertIn("unique folder names", message)
+
+    def test_google_drive_profile_validation_uses_app_oauth_config(self):
+        profile = self.make_profile(password="")
+        profile.protocol = "google-drive"
+        profile.host = ""
+        profile.port = 0
+        profile.username = ""
+        profile.key_path = ""
+        with mock.patch("gpkg_sync.models.has_google_oauth_config", return_value=True):
+            ok, msg = profile.validate()
+
+        self.assertTrue(ok, msg)
+
+    def test_google_drive_profile_validation_fails_when_app_oauth_missing(self):
+        profile = self.make_profile(password="")
+        profile.protocol = "google-drive"
+        profile.host = ""
+        profile.port = 0
+        profile.username = ""
+        profile.key_path = ""
+
+        with mock.patch("gpkg_sync.models.has_google_oauth_config", return_value=False):
+            ok, msg = profile.validate()
+
+        self.assertFalse(ok)
+        self.assertIn("Google Drive sign-in is not configured", msg)
+
+    def test_profile_defaults_to_enabled_when_not_present_in_metadata(self):
+        profile = SyncProfile.from_metadata(
+            {
+                "name": "prod",
+                "host": "example.com",
+                "port": 22,
+                "username": "alice",
+                "protocol": "sftp",
+                "local_dir": str(self.local_dir),
+                "remote_dir": "/data",
+                "direction": "two-way",
+                "device_label": "device",
+                "stability_wait_seconds": 5,
+            }
+        )
+
+        self.assertTrue(profile.enabled)
+
+    def test_save_profiles_preserves_profile_order(self):
+        first = self.make_profile()
+        second = self.make_profile(password="other")
+        second.name = "staging"
+
+        self.store.save_profiles([second, first])
+        loaded = self.store.load_profiles()
+
+        self.assertEqual([profile.name for profile in loaded], ["staging", "prod"])
+
+    def test_onedrive_profile_validation_requires_client_and_tenant(self):
+        profile = self.make_profile(password="")
+        profile.protocol = "onedrive"
+        profile.host = ""
+        profile.port = 0
+        profile.username = ""
+        profile.key_path = ""
+        profile.client_id = "client-id"
+        profile.tenant_id = "tenant-id"
+
+        ok, msg = profile.validate()
+
+        self.assertTrue(ok, msg)

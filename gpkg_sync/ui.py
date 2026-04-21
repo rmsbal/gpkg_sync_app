@@ -60,24 +60,31 @@ class ProfileDialog(QDialog):
     def _build_ui(self) -> None:
         layout = QVBoxLayout(self)
         form = QFormLayout()
+        self.form = form
 
         self.name_edit = QLineEdit()
         self.host_edit = QLineEdit()
         self.port_spin = QSpinBox()
-        self.port_spin.setRange(1, 65535)
+        self.port_spin.setRange(0, 65535)
         self.port_spin.setValue(22)
         self.protocol_combo = QComboBox()
-        self.protocol_combo.addItems(["sftp", "ftp", "ftps"])
+        self.protocol_combo.addItems(["sftp", "ftp", "ftps", "google-drive", "onedrive"])
         self.protocol_combo.currentTextChanged.connect(self._apply_protocol_default)
         self.username_edit = QLineEdit()
         self.password_edit = QLineEdit()
         self.password_edit.setEchoMode(QLineEdit.Password)
         self.key_path_edit = QLineEdit()
+        self.client_id_edit = QLineEdit()
+        self.tenant_id_edit = QLineEdit()
+        self.protocol_hint = QLabel()
+        self.protocol_hint.setWordWrap(True)
         self.watch_dirs_list = QListWidget()
         self.watch_dirs_list.setSelectionMode(QListWidget.SingleSelection)
         self.remote_dir_edit = QLineEdit()
         self.direction_combo = QComboBox()
         self.direction_combo.addItems(["upload-only", "download-only", "two-way"])
+        self.enabled_check = QCheckBox("Profile is enabled")
+        self.enabled_check.setChecked(True)
         self.auto_start_check = QCheckBox("Start syncing when app opens")
         self.backup_check = QCheckBox("Backup before local overwrite")
         self.backup_check.setChecked(True)
@@ -97,6 +104,7 @@ class ProfileDialog(QDialog):
         key_layout = QHBoxLayout()
         key_layout.addWidget(self.key_path_edit)
         key_layout.addWidget(browse_key_btn)
+        self.key_path_widget = self._wrap_layout(key_layout)
         watch_dir_buttons = QHBoxLayout()
         watch_dir_buttons.addWidget(add_watch_btn)
         watch_dir_buttons.addWidget(remove_watch_btn)
@@ -111,12 +119,16 @@ class ProfileDialog(QDialog):
         form.addRow("Port", self.port_spin)
         form.addRow("Username", self.username_edit)
         form.addRow("Password", self.password_edit)
-        form.addRow("SSH key", self._wrap_layout(key_layout))
+        form.addRow("SSH key", self.key_path_widget)
+        form.addRow("Client ID", self.client_id_edit)
+        form.addRow("Tenant ID", self.tenant_id_edit)
+        form.addRow("", self.protocol_hint)
         form.addRow("Watch folders", self._wrap_layout(watch_dirs_layout))
         form.addRow("Remote folder", self.remote_dir_edit)
         form.addRow("Direction", self.direction_combo)
         form.addRow("Device label", self.device_label_edit)
         form.addRow("Stability wait (sec)", self.stability_spin)
+        form.addRow("", self.enabled_check)
         form.addRow("", self.auto_start_check)
         form.addRow("", self.backup_check)
         form.addRow("", self.delete_missing_check)
@@ -135,6 +147,7 @@ class ProfileDialog(QDialog):
         buttons.addWidget(cancel_btn)
         layout.addLayout(buttons)
         self.resize(640, 420)
+        self._update_protocol_fields(self.protocol_combo.currentText())
 
     def _wrap_layout(self, layout) -> QWidget:
         widget = QWidget()
@@ -143,8 +156,45 @@ class ProfileDialog(QDialog):
 
     def _apply_protocol_default(self, protocol: str) -> None:
         default_port = DEFAULT_PORTS.get(protocol)
-        if default_port:
+        if default_port is not None:
             self.port_spin.setValue(default_port)
+        self._update_protocol_fields(protocol)
+
+    def _update_protocol_fields(self, protocol: str) -> None:
+        protocol = protocol.lower()
+        is_network = protocol in {"sftp", "ftp", "ftps"}
+        is_sftp = protocol == "sftp"
+        is_google = protocol == "google-drive"
+        is_onedrive = protocol == "onedrive"
+        self._set_row_visible(self.host_edit, is_network)
+        self._set_row_visible(self.port_spin, is_network)
+        self._set_row_visible(self.username_edit, is_network)
+        self._set_row_visible(self.password_edit, is_network)
+        self._set_row_visible(self.key_path_widget, is_sftp)
+        self._set_row_visible(self.client_id_edit, is_onedrive)
+        self._set_row_visible(self.tenant_id_edit, is_onedrive)
+        self.host_edit.setPlaceholderText("example.com" if is_network else "")
+        self.username_edit.setPlaceholderText("Username" if is_network else "")
+        self.password_edit.setPlaceholderText("Password" if is_network else "")
+        self.remote_dir_edit.setPlaceholderText("/folder/on/remote" if is_network else "/Apps/gpkg-sync")
+        self.protocol_hint.setText(self._protocol_hint_text(protocol))
+
+    def _set_row_visible(self, field: QWidget, visible: bool) -> None:
+        label = self.form.labelForField(field)
+        if label is not None:
+            label.setVisible(visible)
+        field.setVisible(visible)
+
+    def _protocol_hint_text(self, protocol: str) -> str:
+        if protocol == "google-drive":
+            return "Google Drive uses your browser for sign-in. Click Test connection or start syncing to link your Google account, then use a path-like remote folder such as /Apps/gpkg-sync."
+        if protocol == "onedrive":
+            return "OneDrive uses Microsoft sign-in. Enter the Azure app Client ID and Tenant ID, then use a path-like remote folder such as /Apps/gpkg-sync."
+        if protocol == "sftp":
+            return "SFTP can use a password or an SSH private key."
+        if protocol == "ftps":
+            return "FTPS uses explicit TLS on the standard FTP port unless you change it."
+        return "FTP uses username/password authentication."
 
     def _browse_key(self) -> None:
         path, _ = QFileDialog.getOpenFileName(self, "Choose SSH Private Key")
@@ -169,9 +219,12 @@ class ProfileDialog(QDialog):
         self.username_edit.setText(profile.username)
         self.password_edit.setText(profile.password)
         self.key_path_edit.setText(profile.key_path)
+        self.client_id_edit.setText(profile.client_id)
+        self.tenant_id_edit.setText(profile.tenant_id)
         self._set_watch_dirs(profile.effective_watch_dirs())
         self.remote_dir_edit.setText(profile.remote_dir)
         self.direction_combo.setCurrentText(profile.direction)
+        self.enabled_check.setChecked(profile.enabled)
         self.auto_start_check.setChecked(profile.auto_start)
         self.backup_check.setChecked(profile.backup_before_overwrite)
         self.delete_missing_check.setChecked(profile.delete_missing)
@@ -188,10 +241,14 @@ class ProfileDialog(QDialog):
             username=self.username_edit.text().strip(),
             password=self.password_edit.text(),
             key_path=self.key_path_edit.text().strip(),
+            credentials_path="",
+            client_id=self.client_id_edit.text().strip(),
+            tenant_id=self.tenant_id_edit.text().strip(),
             local_dir=watch_dirs[0] if watch_dirs else "",
             watch_dirs=watch_dirs,
             remote_dir=self.remote_dir_edit.text().strip(),
             direction=self.direction_combo.currentText(),
+            enabled=self.enabled_check.isChecked(),
             auto_start=self.auto_start_check.isChecked(),
             backup_before_overwrite=self.backup_check.isChecked(),
             delete_missing=self.delete_missing_check.isChecked(),
@@ -281,21 +338,30 @@ class MainWindow(QMainWindow):
         self.add_btn = QPushButton("Add")
         self.edit_btn = QPushButton("Edit")
         self.delete_btn = QPushButton("Delete")
+        self.toggle_enabled_btn = QPushButton("Turn off")
+        self.move_up_btn = QPushButton("Move up")
+        self.move_down_btn = QPushButton("Move down")
         self.start_btn = QPushButton("Start")
         self.stop_btn = QPushButton("Stop")
         self.sync_now_btn = QPushButton("Sync now")
         self.add_btn.clicked.connect(self.add_profile)
         self.edit_btn.clicked.connect(self.edit_profile)
         self.delete_btn.clicked.connect(self.delete_profile)
+        self.toggle_enabled_btn.clicked.connect(self.toggle_selected_profile_enabled)
+        self.move_up_btn.clicked.connect(self.move_selected_profile_up)
+        self.move_down_btn.clicked.connect(self.move_selected_profile_down)
         self.start_btn.clicked.connect(self.start_selected_profile)
         self.stop_btn.clicked.connect(self.stop_selected_profile)
         self.sync_now_btn.clicked.connect(self.sync_now_selected)
         button_grid.addWidget(self.add_btn, 0, 0)
         button_grid.addWidget(self.edit_btn, 0, 1)
         button_grid.addWidget(self.delete_btn, 1, 0)
-        button_grid.addWidget(self.start_btn, 1, 1)
-        button_grid.addWidget(self.stop_btn, 2, 0)
-        button_grid.addWidget(self.sync_now_btn, 2, 1)
+        button_grid.addWidget(self.toggle_enabled_btn, 1, 1)
+        button_grid.addWidget(self.move_up_btn, 2, 0)
+        button_grid.addWidget(self.move_down_btn, 2, 1)
+        button_grid.addWidget(self.start_btn, 3, 0)
+        button_grid.addWidget(self.stop_btn, 3, 1)
+        button_grid.addWidget(self.sync_now_btn, 4, 0, 1, 2)
         profile_layout.addLayout(button_grid)
         left_box.addWidget(profile_group)
 
@@ -365,7 +431,8 @@ class MainWindow(QMainWindow):
     def _load_profiles_ui(self) -> None:
         self.profile_list.clear()
         for profile in self.profiles:
-            self.profile_list.addItem(QListWidgetItem(profile.name))
+            label = profile.name if profile.enabled else f"{profile.name} [Off]"
+            self.profile_list.addItem(QListWidgetItem(label))
         if self.profiles:
             self.profile_list.setCurrentRow(0)
 
@@ -400,7 +467,11 @@ class MainWindow(QMainWindow):
         self.local_dir_value.setText("\n".join(profile.effective_watch_dirs()) or "-")
         self.remote_dir_value.setText(profile.remote_dir)
         self.direction_value.setText(profile.direction)
-        self.status_value.setText("Running" if profile.name in self.engines else "Stopped")
+        self.status_value.setText("Disabled" if not profile.enabled else ("Running" if profile.name in self.engines else "Stopped"))
+        self.toggle_enabled_btn.setText("Turn off" if profile.enabled else "Turn on")
+        row = self.profile_list.currentRow()
+        self.move_up_btn.setEnabled(row > 0)
+        self.move_down_btn.setEnabled(0 <= row < len(self.profiles) - 1)
         self.load_history(profile.name)
 
     def load_history(self, profile_name: str) -> None:
@@ -485,7 +556,45 @@ class MainWindow(QMainWindow):
             return
         QMetaObject.invokeMethod(self.engines[profile.name], "request_full_sync", Qt.QueuedConnection)
 
+    def toggle_selected_profile_enabled(self) -> None:
+        profile = self.get_selected_profile()
+        if not profile:
+            return
+        if profile.enabled:
+            if profile.name in self.engines:
+                self.stop_profile(profile.name)
+            profile.enabled = False
+            profile.auto_start = False
+        else:
+            profile.enabled = True
+        if self._save_profiles():
+            row = self.profile_list.currentRow()
+            self._load_profiles_ui()
+            if row >= 0:
+                self.profile_list.setCurrentRow(row)
+
+    def move_selected_profile_up(self) -> None:
+        row = self.profile_list.currentRow()
+        if row <= 0 or row >= len(self.profiles):
+            return
+        self.profiles[row - 1], self.profiles[row] = self.profiles[row], self.profiles[row - 1]
+        if self._save_profiles():
+            self._load_profiles_ui()
+            self.profile_list.setCurrentRow(row - 1)
+
+    def move_selected_profile_down(self) -> None:
+        row = self.profile_list.currentRow()
+        if row < 0 or row >= len(self.profiles) - 1:
+            return
+        self.profiles[row], self.profiles[row + 1] = self.profiles[row + 1], self.profiles[row]
+        if self._save_profiles():
+            self._load_profiles_ui()
+            self.profile_list.setCurrentRow(row + 1)
+
     def start_profile(self, profile: SyncProfile) -> None:
+        if not profile.enabled:
+            QMessageBox.information(self, APP_NAME, "Profile is turned off. Turn it on before starting.")
+            return
         if profile.name in self.engines:
             QMessageBox.information(self, APP_NAME, "Profile is already running.")
             return
@@ -532,7 +641,7 @@ class MainWindow(QMainWindow):
 
     def _auto_start_profiles(self) -> None:
         for profile in self.profiles:
-            if profile.auto_start:
+            if profile.enabled and profile.auto_start:
                 QTimer.singleShot(500, lambda p=profile: self.start_profile(p))
 
     def closeEvent(self, event: QCloseEvent) -> None:

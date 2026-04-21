@@ -275,3 +275,13 @@ class SyncEngineTests(unittest.TestCase):
         self.assertEqual(target.read_bytes(), b"remote-bytes")
         conflict_files = list(self.local_dir.glob("report.conflict-*"))
         self.assertEqual(conflict_files, [])
+
+    def test_sha1_file_reports_progress(self):
+        target = self.local_dir / "big.bin"
+        target.write_bytes(b"a" * (2 * 1024 * 1024 + 10))
+        updates = []
+
+        sha1_file(target, chunk_size=1024 * 1024, progress=lambda done, total: updates.append((done, total)))
+
+        self.assertTrue(updates)
+        self.assertEqual(updates[-1], (target.stat().st_size, target.stat().st_size))

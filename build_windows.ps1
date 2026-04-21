@@ -1,6 +1,6 @@
 param(
     [string]$AppName = "gpkgSyncApp",
-    [string]$Version = "0.1.0",
+    [string]$Version = "1.2",
     [string]$SpecPath = "gpkgSyncApp.windows.spec",
     [string]$InstallerScript = "windows-installer\gpkgSyncApp.iss",
     [string]$OutputDir = "dist\windows",
