@@ -64,7 +64,7 @@ OAuth token caches for Google Drive and OneDrive are stored in `~/.gpkg_sync` af
 ### Cloud drive setup
 
 - `google-drive`: choose Google Drive in the app, then sign in through your browser the first time the profile connects.
-- The app-level Google OAuth client can be provided in `~/.gpkg_sync/google_oauth_client.json` or in a project `.env` file with `GPKG_SYNC_GOOGLE_CLIENT_ID` and `GPKG_SYNC_GOOGLE_CLIENT_SECRET`.
+- The app-level Google OAuth client can be provided in `~/.gpkg_sync/google_oauth_client.json`, next to `gpkgSyncApp.exe` for portable Windows builds, with `GPKG_SYNC_GOOGLE_CLIENT_JSON`, or in a `.env` file with `GPKG_SYNC_GOOGLE_CLIENT_ID` and `GPKG_SYNC_GOOGLE_CLIENT_SECRET`.
 - `onedrive`: provide an Azure app `Client ID` and `Tenant ID`, then sign in with Microsoft when prompted.
 - For cloud profiles, use a path-like remote folder such as `/Apps/gpkg-sync`.
 
@@ -83,6 +83,16 @@ OAuth token caches for Google Drive and OneDrive are stored in `~/.gpkg_sync` af
 Use the Windows installer:
 
 `gpkg_sync_setup.exe`
+
+### Portable package
+
+Use the portable ZIP if you do not want an installer:
+
+`gpkgSyncApp-1.2-windows-x64-portable.zip`
+
+Extract the ZIP to any writable folder, then run:
+
+`gpkgSyncApp\gpkgSyncApp.exe`
 
 ### Install steps
 
@@ -136,10 +146,47 @@ Output:
 
 - `dist\windows\gpkg_sync_setup.exe`
 
+### Build Windows portable app
+
+Run on a Windows machine with:
+
+- Python
+- `pyinstaller`
+
+Command:
+
+```powershell
+.\build_portable_windows.ps1
+```
+
+If PowerShell blocks local scripts, run:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\build_portable_windows.ps1
+```
+
+Output:
+
+- `dist\portable\gpkgSyncApp-1.2-windows-x64-portable.zip`
+- `dist\gpkgSyncApp\gpkgSyncApp.exe`
+
+If Python is not on `PATH`, pass its full path:
+
+```powershell
+.\build_portable_windows.ps1 -Python "C:\Path\To\python.exe"
+```
+
+If PyInstaller is missing:
+
+```powershell
+python -m pip install pyinstaller
+```
+
 Important:
 
 - Running the normal Linux build does not create a Windows `.exe` installer.
 - If you build this project on Linux, you will only see Linux artifacts such as `gpkg_sync-1.2-x86_64.AppImage` or `dist/gpkgSyncApp`.
+- The Windows portable folder or ZIP is generated after running `build_portable_windows.ps1` on a Windows machine with PyInstaller installed.
 - The Windows installer is only generated after running `build_windows.ps1` on a Windows machine with PyInstaller and Inno Setup installed.
 
 ## Notes

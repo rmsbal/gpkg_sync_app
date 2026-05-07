@@ -3,16 +3,16 @@ from __future__ import annotations
 import ctypes.util
 import os
 import sys
-from pathlib import Path
 
 from PySide6.QtWidgets import QApplication, QMessageBox
 
 from .models import APP_NAME
+from .paths import app_data_dir
 from .ui import MainWindow
 
 
 def ensure_app_dir() -> None:
-    (Path.home() / ".gpkg_sync").mkdir(parents=True, exist_ok=True)
+    app_data_dir().mkdir(parents=True, exist_ok=True)
 
 
 def runtime_preflight() -> str | None:

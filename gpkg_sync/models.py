@@ -10,6 +10,7 @@ from .oauth import google_oauth_setup_hint, has_google_oauth_config
 
 APP_NAME = "gpkg sync"
 APP_VERSION = "1.2"
+MAX_ITEM_SIZE_BYTES = 1024 * 1024 * 1024
 DEFAULT_PORTS = {
     "sftp": 22,
     "ftp": 21,

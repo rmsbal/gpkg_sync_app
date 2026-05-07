@@ -7,6 +7,7 @@ from pathlib import Path
 from unittest import mock
 
 from gpkg_sync.app import runtime_preflight
+from gpkg_sync.paths import app_data_dir
 
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -38,10 +39,28 @@ class RuntimeAndPackagingTests(unittest.TestCase):
 
     def test_windows_packaging_assets_exist(self):
         build_script = (ROOT / "build_windows.ps1").read_text(encoding="utf-8")
+        portable_script = (ROOT / "build_portable_windows.ps1").read_text(encoding="utf-8")
         windows_spec = (ROOT / "gpkgSyncApp.windows.spec").read_text(encoding="utf-8")
         installer_script = (ROOT / "windows-installer" / "gpkgSyncApp.iss").read_text(encoding="utf-8")
         self.assertIn("pyinstaller --noconfirm", build_script)
         self.assertIn("ISCC", build_script)
+        self.assertIn("-m PyInstaller --noconfirm", portable_script)
+        self.assertIn("Compress-Archive", portable_script)
+        self.assertIn("windows-x64-portable.zip", portable_script)
+        self.assertIn("IncludeAccountData", portable_script)
+        self.assertIn("google-drive-default-token.json", portable_script)
+        self.assertIn("gpkg_sync\\google_oauth_client.json", portable_script)
+        self.assertIn("Copy-Item", portable_script)
+        self.assertIn("gpkg_sync\\google_oauth_client.json", build_script)
+        self.assertIn("Copy-Item", build_script)
         self.assertIn("('PySide6', 'keyring')", windows_spec)
         self.assertIn("collect_all(package_name)", windows_spec)
+        self.assertIn("collect_python_sqlite_binaries()", windows_spec)
+        self.assertIn("'_sqlite3'", windows_spec)
+        self.assertIn("'sqlite3.dll'", windows_spec)
+        self.assertIn("datas.append((str(google_client_json), '.'))", windows_spec)
         self.assertIn("OutputBaseFilename=gpkg_sync_setup", installer_script)
+
+    def test_app_data_dir_can_be_overridden(self):
+        with mock.patch.dict(os.environ, {"GPKG_SYNC_APP_DIR": "C:\\portable-data"}):
+            self.assertEqual(str(app_data_dir()), "C:\\portable-data")

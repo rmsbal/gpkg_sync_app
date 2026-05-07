@@ -10,12 +10,33 @@ for site_packages in [*repo_root.glob('.venv/lib/python*/site-packages'), repo_r
     if site_packages.exists():
         sys.path.insert(0, str(site_packages))
 
+
+def collect_python_sqlite_binaries():
+    search_roots = [Path(sys.base_prefix), Path(sys.prefix), Path(sys.executable).resolve().parent]
+    for root in list(search_roots):
+        search_roots.extend(root.parents[:3])
+
+    candidates = []
+    for root in dict.fromkeys(search_roots):
+        candidates.extend([
+            root / 'DLLs' / 'sqlite3.dll',
+            root / 'bin' / 'sqlite3.dll',
+            root / 'sqlite3.dll',
+        ])
+
+    for candidate in candidates:
+        if candidate.exists():
+            return [(str(candidate), '.')]
+    return []
+
+
 datas = []
 google_client_json = Path('gpkg_sync') / 'google_oauth_client.json'
 if google_client_json.exists():
+    datas.append((str(google_client_json), '.'))
     datas.append((str(google_client_json), 'gpkg_sync'))
-binaries = []
-hiddenimports = ['paramiko', 'watchdog', 'msal', 'requests']
+binaries = collect_python_sqlite_binaries()
+hiddenimports = ['_sqlite3', 'paramiko', 'watchdog', 'msal', 'requests']
 tmp_ret = collect_all('PySide6')
 datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
 for package_name in ('googleapiclient', 'google_auth_oauthlib', 'google.auth', 'msal'):

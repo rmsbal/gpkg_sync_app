@@ -70,6 +70,11 @@ try {
         throw "PyInstaller output directory not found at $appDistDir"
     }
 
+    $googleClientJson = Join-Path $repoRoot "gpkg_sync\google_oauth_client.json"
+    if (Test-Path $googleClientJson) {
+        Copy-Item -Force -Path $googleClientJson -Destination (Join-Path $appDistDir "google_oauth_client.json")
+    }
+
     & $iscc `
         "/DMyAppVersion=$Version" `
         "/DMyAppSourceDir=$appDistDir" `

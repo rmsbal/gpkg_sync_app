@@ -127,6 +127,45 @@ class FTPManagerTests(unittest.TestCase):
 
         self.assertIsInstance(manager, SFTPManager)
 
+    def test_google_drive_token_cache_is_shared_across_profiles(self):
+        self.profile.protocol = "google-drive"
+        first = GoogleDriveManager(self.profile)
+        other_profile = SyncProfile(
+            name="other",
+            host="",
+            port=0,
+            username="",
+            protocol="google-drive",
+            local_dir=self.profile.local_dir,
+            remote_dir="/remote",
+            device_label="device",
+        )
+        second = GoogleDriveManager(other_profile)
+
+        self.assertEqual(first._token_path, second._token_path)
+        self.assertEqual(first._token_path.name, "google-drive-default-token.json")
+
+    def test_onedrive_token_cache_is_shared_for_same_app_account(self):
+        self.profile.protocol = "onedrive"
+        self.profile.client_id = "client-id"
+        self.profile.tenant_id = "tenant-id"
+        first = OneDriveManager(self.profile)
+        other_profile = SyncProfile(
+            name="other",
+            host="",
+            port=0,
+            username="",
+            protocol="onedrive",
+            local_dir=self.profile.local_dir,
+            remote_dir="/remote",
+            client_id="client-id",
+            tenant_id="tenant-id",
+            device_label="device",
+        )
+        second = OneDriveManager(other_profile)
+
+        self.assertEqual(first._cache_path, second._cache_path)
+
     def test_onedrive_large_upload_uses_chunked_session(self):
         self.profile.protocol = "onedrive"
         self.profile.client_id = "client-id"

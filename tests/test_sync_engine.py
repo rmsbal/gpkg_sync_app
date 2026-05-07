@@ -7,7 +7,7 @@ from pathlib import Path
 from PySide6.QtCore import QCoreApplication
 
 from gpkg_sync.logging_utils import AppLogger
-from gpkg_sync.models import SyncProfile
+from gpkg_sync.models import MAX_ITEM_SIZE_BYTES, SyncProfile
 from gpkg_sync.storage import StateDB
 from gpkg_sync.sync_engine import SyncEngine, normalize_remote_path, remote_relpath, safe_relpath, sha1_file
 
@@ -177,6 +177,29 @@ class SyncEngineTests(unittest.TestCase):
         self.engine.full_sync()
 
         self.assertIn("/remote/docs/notes.txt", self.transport.files)
+
+    def test_full_sync_skips_local_file_over_one_gb(self):
+        large = self.local_dir / "large.gpkg"
+        with large.open("wb") as handle:
+            handle.truncate(MAX_ITEM_SIZE_BYTES + 1)
+
+        self.engine.full_sync()
+
+        self.assertNotIn("/remote/large.gpkg", self.transport.files)
+        state = self.db.get_file_state(self.profile.name, str(large), "/remote/large.gpkg")
+        self.assertIsNotNone(state)
+        self.assertEqual(state["status"], "skipped")
+
+    def test_full_sync_skips_remote_file_over_one_gb(self):
+        self.transport.files["/remote/large.gpkg"] = (MAX_ITEM_SIZE_BYTES + 1, 10.0)
+
+        self.engine.full_sync()
+
+        target = self.local_dir / "large.gpkg"
+        self.assertFalse(target.exists())
+        state = self.db.get_file_state(self.profile.name, str(target), "/remote/large.gpkg")
+        self.assertIsNotNone(state)
+        self.assertEqual(state["status"], "skipped")
 
     def test_full_sync_downloads_file_without_extension(self):
         self.transport.files["/remote/config/README"] = (12, 10.0)

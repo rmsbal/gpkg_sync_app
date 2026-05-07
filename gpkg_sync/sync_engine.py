@@ -15,7 +15,7 @@ from watchdog.events import FileSystemEventHandler
 from watchdog.observers import Observer
 
 from .logging_utils import AppLogger
-from .models import SyncProfile
+from .models import MAX_ITEM_SIZE_BYTES, SyncProfile
 from .storage import StateDB, now_ts
 from .transports import FileTransport, transport_for_profile
 
@@ -34,6 +34,10 @@ def fmt_size(num_bytes: int) -> str:
             return f"{value:.1f} {unit}" if unit != "B" else f"{int(value)} B"
         value /= 1024.0
     return f"{num_bytes} B"
+
+
+def is_within_item_size_limit(size_bytes: int) -> bool:
+    return size_bytes <= MAX_ITEM_SIZE_BYTES
 
 
 def fmt_duration(seconds: float) -> str:
@@ -496,9 +500,28 @@ class SyncEngine(QObject):
 
     def upload_local_file(self, local_path: Path, remote_path: str, reason: str) -> None:
         rel = self.relative_remote_path_for_local(local_path)
+        local_stat = local_path.stat()
+        if not is_within_item_size_limit(int(local_stat.st_size)):
+            message = f"Skipping {rel}: item is {fmt_size(int(local_stat.st_size))}, over the 1.0 GB limit."
+            self.status_changed.emit(self.profile.name, f"Skipped {local_path.name}")
+            self.emit_log("WARNING", "ITEM_SIZE_LIMIT", message)
+            self.db.upsert_file_state(
+                self.profile.name,
+                str(local_path),
+                remote_path,
+                float(local_stat.st_mtime),
+                None,
+                int(local_stat.st_size),
+                None,
+                None,
+                "skipped",
+                "Item exceeds 1.0 GB limit",
+            )
+            self.file_synced.emit({"profile": self.profile.name, "file": rel, "direction": "upload", "time": fmt_ts(now_ts()), "status": "skipped"})
+            return
         self.status_changed.emit(self.profile.name, f"Uploading {local_path.name}")
         self.emit_log("INFO", "UPLOAD_START", f"Uploading {rel} ({reason})")
-        total = max(1, local_path.stat().st_size)
+        total = max(1, local_stat.st_size)
         transfer_started_at = time.monotonic()
 
         def callback(sent: int, _total: int) -> None:
@@ -550,6 +573,25 @@ class SyncEngine(QObject):
         rel = local_path.name
         with contextlib.suppress(ValueError):
             rel = self.relative_remote_path_for_local(local_path)
+        if not is_within_item_size_limit(remote_size):
+            message = f"Skipping {rel}: remote item is {fmt_size(remote_size)}, over the 1.0 GB limit."
+            self.status_changed.emit(self.profile.name, f"Skipped {local_path.name}")
+            self.emit_log("WARNING", "ITEM_SIZE_LIMIT", message)
+            local_stat = local_path.stat() if local_path.exists() else None
+            self.db.upsert_file_state(
+                self.profile.name,
+                str(local_path),
+                remote_path,
+                float(local_stat.st_mtime) if local_stat else None,
+                remote_mtime,
+                int(local_stat.st_size) if local_stat else None,
+                remote_size,
+                None,
+                "skipped",
+                "Item exceeds 1.0 GB limit",
+            )
+            self.file_synced.emit({"profile": self.profile.name, "file": rel, "direction": "download", "time": fmt_ts(now_ts()), "status": "skipped"})
+            return
         self.status_changed.emit(self.profile.name, f"Downloading {local_path.name}")
         self.emit_log("INFO", "DOWNLOAD_START", f"Downloading {rel} ({reason})")
 

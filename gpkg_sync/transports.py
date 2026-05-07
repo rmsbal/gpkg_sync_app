@@ -18,6 +18,7 @@ import paramiko
 
 from .models import SyncProfile
 from .oauth import google_oauth_setup_hint, load_google_client_config
+from .paths import app_data_dir
 
 
 Callback = Optional[Callable[[int, int], None]]
@@ -368,8 +369,12 @@ class GoogleDriveManager(CloudPathMixin):
 
     @property
     def _token_path(self) -> Path:
+        return app_data_dir() / "google-drive-default-token.json"
+
+    @property
+    def _legacy_token_path(self) -> Path:
         safe_name = "".join(ch if ch.isalnum() or ch in "-_" else "_" for ch in self.profile.name)
-        return Path.home() / ".gpkg_sync" / f"google-drive-{safe_name}-token.json"
+        return app_data_dir() / f"google-drive-{safe_name}-token.json"
 
     def connect(self) -> None:
         with self._lock:
@@ -385,6 +390,9 @@ class GoogleDriveManager(CloudPathMixin):
                 raise RuntimeError(google_oauth_setup_hint())
             creds = None
             token_path = self._token_path
+            if not token_path.exists() and self._legacy_token_path.exists():
+                token_path.parent.mkdir(parents=True, exist_ok=True)
+                token_path.write_text(self._legacy_token_path.read_text(encoding="utf-8"), encoding="utf-8")
             if token_path.exists():
                 creds = Credentials.from_authorized_user_file(str(token_path), self.SCOPES)
             if creds and creds.expired and creds.refresh_token:
@@ -610,8 +618,14 @@ class OneDriveManager(CloudPathMixin):
 
     @property
     def _cache_path(self) -> Path:
+        tenant = "".join(ch if ch.isalnum() or ch in "-_" else "_" for ch in self.profile.tenant_id.strip() or "default")
+        client = "".join(ch if ch.isalnum() or ch in "-_" else "_" for ch in self.profile.client_id.strip() or "default")
+        return app_data_dir() / f"onedrive-default-{tenant}-{client}-token.bin"
+
+    @property
+    def _legacy_cache_path(self) -> Path:
         safe_name = "".join(ch if ch.isalnum() or ch in "-_" else "_" for ch in self.profile.name)
-        return Path.home() / ".gpkg_sync" / f"onedrive-{safe_name}-token.bin"
+        return app_data_dir() / f"onedrive-{safe_name}-token.bin"
 
     def connect(self) -> None:
         with self._lock:
@@ -622,6 +636,9 @@ class OneDriveManager(CloudPathMixin):
 
             cache = msal.SerializableTokenCache()
             cache_path = self._cache_path
+            if not cache_path.exists() and self._legacy_cache_path.exists():
+                cache_path.parent.mkdir(parents=True, exist_ok=True)
+                cache_path.write_text(self._legacy_cache_path.read_text(encoding="utf-8"), encoding="utf-8")
             if cache_path.exists():
                 cache.deserialize(cache_path.read_text(encoding="utf-8"))
             authority = f"https://login.microsoftonline.com/{self.profile.tenant_id}"

@@ -37,13 +37,14 @@ from PySide6.QtWidgets import (
 
 from .logging_utils import AppLogger
 from .models import APP_NAME, APP_VERSION, DEFAULT_PORTS, SyncProfile, default_device_label
+from .paths import app_data_dir
 from .startup import StartupError, StartupManager
 from .storage import ConfigError, SecretStore, SecretStoreError, SettingsStore, StateDB
 from .sync_engine import SyncEngine, fmt_ts
 
 
 LOG_MAX_LINES = 1500
-APP_DIR = Path.home() / ".gpkg_sync"
+APP_DIR = app_data_dir()
 DB_PATH = APP_DIR / "gpkg_sync.db"
 CONFIG_PATH = APP_DIR / "profiles.json"
 
@@ -472,6 +473,8 @@ class MainWindow(QMainWindow):
         for profile in self.profiles:
             label = profile.name if profile.enabled else f"{profile.name} [Off]"
             self.profile_list.addItem(QListWidgetItem(label))
+        self.add_btn.setEnabled(True)
+        self.add_btn.setToolTip("Add another sync profile using the saved default cloud account.")
         if self.profiles:
             self.profile_list.setCurrentRow(0)
 
@@ -487,7 +490,7 @@ class MainWindow(QMainWindow):
         if len(lines) > LOG_MAX_LINES:
             self.log_edit.setPlainText("\n".join(lines[-LOG_MAX_LINES:]))
         self.log_edit.moveCursor(QTextCursor.End)
-        if self.tray and level in {"WARNING", "ERROR"}:
+        if self.tray and level == "ERROR":
             self.tray.showMessage(APP_NAME, message)
 
     def get_selected_profile(self) -> Optional[SyncProfile]:
@@ -540,8 +543,26 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, APP_NAME, str(exc))
             return False
 
+    def _new_profile_defaults(self) -> SyncProfile:
+        existing_names = {profile.name for profile in self.profiles}
+        name = "Default"
+        index = 2
+        while name in existing_names:
+            name = f"Profile {index}"
+            index += 1
+        return SyncProfile(
+            name=name,
+            host="",
+            port=DEFAULT_PORTS["google-drive"],
+            username="",
+            protocol="google-drive",
+            remote_dir="/Apps/gpkg-sync",
+            direction="two-way",
+            device_label=default_device_label(),
+        )
+
     def add_profile(self) -> None:
-        dialog = ProfileDialog(self)
+        dialog = ProfileDialog(self, self._new_profile_defaults())
         if dialog.exec() == QDialog.Accepted and dialog.result_profile:
             if any(profile.name == dialog.result_profile.name for profile in self.profiles):
                 QMessageBox.warning(self, APP_NAME, "A profile with that name already exists.")
@@ -687,7 +708,6 @@ class MainWindow(QMainWindow):
         if self.tray and self.tray.isVisible():
             self.hide()
             event.ignore()
-            self.tray.showMessage(APP_NAME, "App minimized to tray and continues syncing.")
             return
         super().closeEvent(event)
 
